@@ -1,6 +1,4 @@
 # src/lifecycle/version_manager.py
-"""Version manager dengan ETag-based caching dan lock"""
-
 import json
 import logging
 import asyncio
@@ -16,7 +14,7 @@ class VersionManager:
         self.key = key
         self.version: Optional[str] = None
         self.cache = Path(CACHE_DIR)
-        self.cache.mkdir(exist_ok=True)
+        self.cache.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
         
         try:
@@ -26,13 +24,14 @@ class VersionManager:
     
     async def ensure_current(self, session):
         async with self._lock:
+            # PERBAIKI: /version bukan /api/version
             async with session.get(
-                f"{BASE_API}/api/version",
+                f"{BASE_API}/version",
                 headers={"X-API-Key": self.key},
                 timeout=15
             ) as resp:
-                data = await resp.json()
                 resp.raise_for_status()
+                data = await resp.json()
                 self.version = data.get("version") or data.get("data", {}).get("version")
             
             if (self.meta.get("_version") == self.version and 
