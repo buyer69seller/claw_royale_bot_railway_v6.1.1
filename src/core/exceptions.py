@@ -40,3 +40,11 @@ class NotSelectedError(ClawRoyaleError):
 class GameError(ClawRoyaleError):
     """General game error"""
     pass
+
+class AgentTokenRequiredError(ClawRoyaleError):
+    """Agent token required - perlu register"""
+    pass
+
+class AccountBlockedError(ClawRoyaleError):
+    """Account is blocked"""
+    pass
