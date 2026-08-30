@@ -34,8 +34,18 @@ class RestClient:
             self._version = data.get("version") or data.get("data", {}).get("version")
             return self._version
     
-    async def get_account(self) -> Dict[str, Any]:
-        return await self._request("GET", "/accounts/me")
+    # src/client/rest_client.py - tambahkan logging di get_account
+
+async def get_account(self) -> Dict[str, Any]:
+    """Dapatkan data akun"""
+    logger.info("📡 Fetching account data...")
+    try:
+        result = await self._request("GET", "/accounts/me")
+        logger.info(f"✅ Account data received: {result.keys() if result else 'empty'}")
+        return result
+    except Exception as e:
+        logger.error(f"❌ Failed to get account: {e}")
+        return {}
     
     async def get_dashboard_games(self, limit: int = 10, cursor: Optional[str] = None) -> Dict:
         params = {"limit": limit}
