@@ -1,6 +1,4 @@
 # src/services/reward_service.py
-"""Service untuk mengelola reward dan redeem"""
-
 import logging
 from typing import Dict, Any
 
@@ -19,6 +17,7 @@ class RewardService:
             if "WELCOME" in self._redeemed_codes:
                 return False
             
+            # PERBAIKI: redeem code dengan path yang benar
             result = await self.rest.redeem_code("WELCOME")
             logger.info(f"🎁 Welcome bundle claimed!")
             self._redeemed_codes.add("WELCOME")
@@ -27,8 +26,12 @@ class RewardService:
         except ClawRoyaleError as e:
             if "already redeemed" in str(e).lower() or "already claimed" in str(e).lower():
                 self._redeemed_codes.add("WELCOME")
+                logger.info("Welcome bundle already claimed")
                 return False
             logger.error(f"Failed to redeem WELCOME: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"Welcome bundle not available: {e}")
             return False
     
     async def check_and_claim_rewards(self) -> Dict[str, Any]:
@@ -60,7 +63,7 @@ class RewardService:
             return results
             
         except Exception as e:
-            logger.error(f"Failed to check rewards: {e}")
+            logger.warning(f"Failed to check rewards: {e}")
             return results
     
     async def get_available_rewards(self) -> Dict[str, Any]:
@@ -78,5 +81,5 @@ class RewardService:
             return available
             
         except Exception as e:
-            logger.error(f"Failed to get available rewards: {e}")
+            logger.warning(f"Failed to get available rewards: {e}")
             return {"quests": [], "daily": False, "season": False}
