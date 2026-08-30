@@ -25,7 +25,7 @@ class RestClient:
     
     @property
     def version(self) -> str:
-        return self._version or "1.15.0"  # Default version
+        return self._version or "1.15.0"
     
     async def get_version(self) -> str:
         """Dapatkan versi API terbaru"""
@@ -34,24 +34,26 @@ class RestClient:
             self._version = data.get("version") or data.get("data", {}).get("version")
             return self._version
     
-    # src/client/rest_client.py - tambahkan logging di get_account
-
-async def get_account(self) -> Dict[str, Any]:
-    """Dapatkan data akun"""
-    logger.info("📡 Fetching account data...")
-    try:
-        result = await self._request("GET", "/accounts/me")
-        logger.info(f"✅ Account data received: {result.keys() if result else 'empty'}")
-        return result
-    except Exception as e:
-        logger.error(f"❌ Failed to get account: {e}")
-        return {}
+    # ===== ACCOUNT ENDPOINTS =====
+    
+    async def get_account(self) -> Dict[str, Any]:
+        """Dapatkan data akun"""
+        logger.info("📡 Fetching account data...")
+        try:
+            result = await self._request("GET", "/accounts/me")
+            logger.info(f"✅ Account data received")
+            return result
+        except Exception as e:
+            logger.error(f"❌ Failed to get account: {e}")
+            return {}
     
     async def get_dashboard_games(self, limit: int = 10, cursor: Optional[str] = None) -> Dict:
         params = {"limit": limit}
         if cursor:
             params["cursor"] = cursor
         return await self._request("GET", "/accounts/me/dashboard/games", params=params)
+    
+    # ===== REDEEM =====
     
     async def redeem_code(self, code: str) -> Dict:
         return await self._request("POST", "/redeem", json={"code": code})
@@ -96,6 +98,8 @@ async def get_account(self) -> Dict[str, Any]:
     async def buy_marketplace_listing(self, listing_id: str) -> Dict:
         return await self._request("POST", f"/api/marketplace/listings/{listing_id}/buy")
     
+    # ===== INTERNAL =====
+    
     async def _request(self, method: str, path: str, **kwargs) -> Dict:
         if not self._session:
             raise RuntimeError("Session not initialized.")
@@ -103,7 +107,7 @@ async def get_account(self) -> Dict[str, Any]:
         url = f"{BASE_API}{path}"
         headers = {
             "Authorization": f"mr-auth {self.api_key}",
-            "X-Version": self._version or "1.15.0"  # <-- Kirim version
+            "X-Version": self._version or "1.15.0"
         }
         
         if "headers" in kwargs:
@@ -122,15 +126,26 @@ async def get_account(self) -> Dict[str, Any]:
                     return {}
                 
                 resp.raise_for_status()
-                data = await resp.json()
+                
+                # Cek response
+                text = await resp.text()
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    logger.warning(f"Non-JSON response: {text[:200]}")
+                    return {}
                 
                 if not data.get("success", True):
                     error = data.get("error", {})
                     raise ClawRoyaleError(f"API Error: {error.get('code')} - {error.get('message')}")
                 
                 return data.get("data", {})
+                
         except aiohttp.ClientError as e:
             logger.warning(f"Request failed: {e}")
+            return {}
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON decode error: {e}")
             return {}
     
     def _get(self, path: str, **kwargs):
