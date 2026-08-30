@@ -215,26 +215,27 @@ class HybridAIEngine:
         my_max_hp = float(me.get("maxHp", 1))
         hp_ratio = my_hp / max(my_max_hp, 1)
         alert = state.get_region().get("alertGauge", 0)
+        my_atk = float(me.get("attack", me.get("atk", 0)))
         
         # === PRIORITY 1: SURVIVAL ===
         
         # HP < 30% → HEAL (gunakan get_healing_items)
+        if hp_ratio < 0.3:
             healing_items = state.get_healing_items()
             for item in healing_items:
                 heal = float(item.get("heal", item.get("healAmount", 0)))
                 if heal > 0:
-                    distance = state._calculate_distance(state.get_self(), item)
-                    if distance < 3:
-                        self.stats["survival_priority"] += 1
-                        item_id = item.get("instanceId") or item.get("id")
-                        state.mark_item_attempted(item_id)
-                        return PriorityDecision(
-                            priority=1,
-                            action_type="pickup",  # Ambil dulu, lalu use
-                            target_id=item_id,
-                            reasoning=f"Critical HP ({hp_ratio:.0%}) - pickup healing",
-                            confidence=0.95
-                        )
+                    self.stats["survival_priority"] += 1
+                    item_id = item.get("instanceId") or item.get("id")
+                    # Mark as attempted
+                    state.mark_item_attempted(item_id)
+                    return PriorityDecision(
+                        priority=1,
+                        action_type="pickup",
+                        target_id=item_id,
+                        reasoning=f"Critical HP ({hp_ratio:.0%}) - healing",
+                        confidence=0.95
+                    )
         
         # HP < 20% → RETREAT
         if hp_ratio < 0.2:
