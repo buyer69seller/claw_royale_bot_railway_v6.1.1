@@ -5,7 +5,7 @@ import asyncio
 import logging
 import time
 from typing import Optional
-from ..services.auth_service import AuthService
+
 from websockets.exceptions import ConnectionClosed
 
 from ..client.rest_client import RestClient
@@ -19,7 +19,8 @@ from ..core.exceptions import (
     AgentDeadError,
     ResumeTargetDeadError,
     NotSelectedError,
-    TargetDeadError
+    TargetDeadError,
+    AgentTokenRequiredError
 )
 from ..core.constants import (
     MIN_RETRY_DELAY,
@@ -34,50 +35,177 @@ logger = logging.getLogger(__name__)
 
 
 class Driver:
+    """Driver utama bot dengan AI"""
+
     def __init__(self, rest_client: RestClient):
         self.rest = rest_client
         self.router = StateRouter(rest_client)
         self.version_mgr = VersionManager(rest_client.api_key)
-        
+
         # AI Components
         self.ai = DecisionEngine()
         self.knowledge: Optional[KnowledgeBase] = None
-        self.auth_service: Optional[AuthService] = None  # <-- TAMBAH
-        
+        self.auth_service = None  # Will be set from main
+
         # Fallback strategy
         self.strategy = StrategyEngine()
-        
+
         self.current_game: Optional[GameState] = None
         self.delay = MIN_RETRY_DELAY
         self.game_count = 0
         self.ai_enabled = True
 
+    async def run(self):
+        """Loop utama driver"""
+        self.delay = MIN_RETRY_DELAY
+
+        while True:
+            try:
+                await self.version_mgr.ensure_current(self.rest._session)
+                state_info = await self.router.resolve_state()
+                logger.info(f"State: {state_info['state']} -> {state_info['action']}")
+
+                if state_info["action"] in ["start_free", "start_paid"]:
+                    await self._start_game(state_info["entry_type"])
+                elif state_info["action"] in ["resume_free", "resume_paid"]:
+                    await self._resume_game(state_info["entry_type"])
+                elif state_info["action"] == "idle":
+                    logger.info("⏳ Idle, waiting for game...")
+                    await asyncio.sleep(5)
+                elif state_info["action"] == "error":
+                    logger.warning("⚠️ Error state, waiting...")
+                    await asyncio.sleep(10)
+
+                self.delay = MIN_RETRY_DELAY
+
+            except ResumeTargetDeadError as e:
+                logger.warning(f"Resume target dead: {e}, re-dialing...")
+                await asyncio.sleep(1)
+                self.delay = MIN_RETRY_DELAY
+                continue
+
+            except ConnectionClosed as e:
+                logger.warning(f"WebSocket closed: {e.code} - {e.reason}")
+                if e.code in (1013, 4008, 4030, 4031):
+                    await asyncio.sleep(3)
+                else:
+                    await asyncio.sleep(self.delay)
+                    self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
+
+            except AgentDeadError:
+                logger.info("💀 Agent died, restarting...")
+                if self.current_game and self.knowledge:
+                    self.knowledge.record_outcome("death", {
+                        "kills": self.current_game.kills,
+                        "survival_time": self.current_game.survival_time
+                    })
+                self.current_game = None
+                self.strategy.reset_rejection_counter()
+                await asyncio.sleep(1)
+                self.delay = MIN_RETRY_DELAY
+
+            except NotSelectedError:
+                logger.info("❌ Not selected, retrying...")
+                await asyncio.sleep(2)
+                self.delay = MIN_RETRY_DELAY
+
+            except AgentTokenRequiredError:
+                logger.warning("🔑 Agent token required! Trying to register...")
+                if self.auth_service:
+                    await self.auth_service.rest.ensure_agent_token()
+                await asyncio.sleep(2)
+                self.delay = MIN_RETRY_DELAY
+
+            except Exception as e:
+                logger.exception(f"Driver error: {e}")
+                await asyncio.sleep(self.delay)
+                self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
+
     async def _start_game(self, entry_type: str):
-        """Mulai game baru - menggunakan AuthService"""
+        """Mulai game baru - via WebSocket"""
         logger.info(f"🎮 Joining {entry_type} game...")
         self.current_game = GameState(entry_type=entry_type)
 
         try:
-            # Gunakan auth service untuk join
+            # Get auth headers
             if not self.auth_service:
                 from ..services.auth_service import AuthService
                 self.auth_service = AuthService(self.rest)
+
+            headers = await self.auth_service.get_websocket_auth()
             
-            # Join via WebSocket
-            ws = await self.auth_service.join_game_websocket(entry_type)
+            # Connect via WebSocket with auth
+            import websockets
+            import json
             
-            # Tunggu assignment
-            assignment = await self.auth_service.wait_for_game_assignment(ws, entry_type)
+            from ..core.constants import JOIN_WS
             
-            if assignment and assignment.get("type") in ("assigned", "joined"):
-                self.current_game.game_id = assignment.get("gameId")
-                logger.info(f"✅ Game joined: {self.current_game.game_id}")
-                await self._play_game(ws)
-                return
-            else:
-                logger.warning("❌ Failed to join game, retrying...")
-                await asyncio.sleep(3)
-                return
+            connection = await websockets.connect(
+                JOIN_WS,
+                additional_headers=headers,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=5
+            )
+            
+            # Baca welcome frame
+            welcome = json.loads(await connection.recv())
+            decision = welcome.get("decision")
+            logger.info(f"📨 Welcome decision: {decision}")
+            
+            # Kirim hello
+            hello = {"type": "hello", "entryType": entry_type}
+            if entry_type == "paid":
+                hello["mode"] = "offchain"
+            await connection.send(json.dumps(hello))
+            logger.info(f"📤 Sent hello: {entry_type}")
+            
+            # Tunggu response
+            while True:
+                msg = json.loads(await connection.recv())
+                msg_type = msg.get("type")
+                
+                if msg_type in ("assigned", "joined"):
+                    self.current_game.game_id = msg.get("gameId")
+                    logger.info(f"✅ {msg_type} to game {self.current_game.game_id}")
+                    
+                    # Wrap connection in WSClient
+                    ws = WSClient(self.rest.api_key, self.rest.version)
+                    ws._ws = connection
+                    
+                    await self._play_game(ws)
+                    return
+                    
+                elif msg_type == "not_selected":
+                    logger.warning("❌ Not selected for game")
+                    await asyncio.sleep(2)
+                    return
+                    
+                elif msg_type == "queued":
+                    logger.info("⏳ Queued, waiting for match...")
+                    continue
+                    
+                elif msg_type == "waiting":
+                    logger.info("⏳ Waiting for game...")
+                    continue
+                    
+                elif msg_type == "error":
+                    error = msg.get("error", {})
+                    code = error.get("code")
+                    message = error.get("message", "")
+                    logger.error(f"❌ Server error: {code} - {message}")
+                    
+                    if code == "AGENT_TOKEN_REQUIRED":
+                        raise AgentTokenRequiredError("Agent token required!")
+                    if code == "BLOCKED":
+                        logger.warning("⛔ Account blocked - check API key")
+                        await asyncio.sleep(5)
+                        return
+                    
+                    raise RuntimeError(f"Error from server: {msg}")
+                    
+                else:
+                    logger.debug(f"📨 Unknown message: {msg_type}")
 
         except ResumeTargetDeadError:
             if entry_type == "free":
@@ -91,39 +219,12 @@ class Driver:
 
     async def _resume_game(self, entry_type: str):
         """Resume game yang sedang berjalan"""
-        logger.info(f"Resuming {entry_type} game...")
-
+        logger.info(f"🔄 Resuming {entry_type} game...")
+        
         try:
-            async with WSClient(self.rest.api_key, self.rest.version) as ws:
-                welcome = await ws.recv()
-                logger.info(f"Welcome decision: {welcome.get('decision')}")
-                await ws.send_hello(entry_type)
-
-                while True:
-                    msg = await ws.recv()
-                    msg_type = msg.get("type")
-
-                    if msg_type == "assigned":
-                        self.current_game = GameState(entry_type=entry_type)
-                        self.current_game.game_id = msg.get("gameId")
-                        logger.info(f"Assigned to new game {self.current_game.game_id}")
-                        await self._play_game(ws)
-                        return
-
-                    elif msg_type == "joined":
-                        self.current_game = GameState(entry_type=entry_type)
-                        self.current_game.game_id = msg.get("gameId")
-                        logger.info(f"Resumed game {self.current_game.game_id}")
-                        await self._play_game(ws)
-                        return
-
-                    elif msg_type == "not_selected":
-                        raise NotSelectedError("Not selected for game")
-                    elif msg_type == "error":
-                        raise RuntimeError(f"Error: {msg}")
-                    elif msg_type in ("queued", "waiting"):
-                        continue
-
+            # Same as _start_game but with resume logic
+            await self._start_game(entry_type)
+            
         except ResumeTargetDeadError:
             logger.info(f"{entry_type} resume target dead, re-dialing...")
             raise
@@ -152,7 +253,7 @@ class Driver:
                 # Game selesai
                 if msg_type == "game_settled":
                     self.current_game.mark_finished()
-                    logger.info("Game settled!")
+                    logger.info("🏆 Game settled!")
                     if self.knowledge:
                         self.knowledge.record_outcome("win", {
                             "kills": self.current_game.kills,
@@ -163,7 +264,7 @@ class Driver:
                 if msg_type == "game_ended":
                     self.current_game.mark_finished()
                     placement = msg.get("placement")
-                    logger.info(f"Game ended! Placement: {placement}")
+                    logger.info(f"🏆 Game ended! Placement: {placement}")
                     if self.knowledge and placement and placement <= 5:
                         self.knowledge.record_outcome("win", {
                             "kills": self.current_game.kills,
@@ -264,8 +365,8 @@ class Driver:
                 decision = await self.ai.decide(self.current_game)
 
                 logger.info(
-                    f"🤖 AI Strategy: {self.ai.get_strategy_name()} | "
-                    f"Action: {decision.action_type} "
+                    f"🤖 AI: {self.ai.get_strategy_name()} | "
+                    f"{decision.action_type} "
                     f"(Conf: {decision.confidence:.2f}, "
                     f"Risk: {decision.risk_score:.2f})"
                 )
