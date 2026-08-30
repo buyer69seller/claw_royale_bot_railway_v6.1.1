@@ -8,8 +8,9 @@ from typing import Optional, Dict, Any, AsyncIterator
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from ..core.constants import JOIN_WS
-from ..core.exceptions import AuthenticationError, ResumeTargetDeadError
+# src/client/rest_client.py
+from ..core.constants import BASE_API
+from ..core.exceptions import AuthenticationError, VersionMismatchError, ClawRoyaleError
 
 logger = logging.getLogger(__name__)
 
