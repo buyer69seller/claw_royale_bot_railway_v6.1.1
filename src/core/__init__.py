@@ -4,9 +4,10 @@ from .constants import (
     # Constants
     BASE_API, JOIN_WS, AGENT_WS, API_VERSION_URL,
     DEFAULT_ENTRY_TYPE, DEFAULT_PREFERRED_MODE, DEFAULT_ACTION_INTERVAL,
-    ACTION_INTERVAL_SECONDS,  # <-- TAMBAHKAN INI
+    ACTION_INTERVAL_SECONDS,
     MIN_RETRY_DELAY, MAX_RETRY_DELAY, RETRY_BACKOFF_MULTIPLIER,
     RECONNECT_RESET_THRESHOLD,
+    AUTO_EQUIP_INTERVAL_GAMES,  # <-- TAMBAHKAN INI
     SCORE_HEAL_BASE, SCORE_HEAL_HP_BONUS,
     SCORE_ATTACK_BASE, SCORE_ATTACK_HP_BONUS,
     SCORE_GUARDIAN_PENALTY, SCORE_ATTACK_KILL_BONUS,
@@ -21,15 +22,17 @@ from .constants import (
     ensure_directories
 )
 from .exceptions import *
+
 __all__ = [
     # Config
     "API_KEY", "ENTRY_TYPE", "PREFERRED_MODE", "LOG_LEVEL",
-    # Constants - semua yang ada di constants
+    # Constants
     "BASE_API", "JOIN_WS", "AGENT_WS", "API_VERSION_URL",
     "DEFAULT_ENTRY_TYPE", "DEFAULT_PREFERRED_MODE", "DEFAULT_ACTION_INTERVAL",
     "ACTION_INTERVAL_SECONDS",
     "MIN_RETRY_DELAY", "MAX_RETRY_DELAY", "RETRY_BACKOFF_MULTIPLIER",
     "RECONNECT_RESET_THRESHOLD",
+    "AUTO_EQUIP_INTERVAL_GAMES",  # <-- TAMBAHKAN INI
     "SCORE_HEAL_BASE", "SCORE_HEAL_HP_BONUS",
     "SCORE_ATTACK_BASE", "SCORE_ATTACK_HP_BONUS",
     "SCORE_GUARDIAN_PENALTY", "SCORE_ATTACK_KILL_BONUS",
@@ -45,5 +48,6 @@ __all__ = [
     # Exceptions
     "ClawRoyaleError", "ConfigurationError", "VersionMismatchError",
     "AgentDeadError", "TargetDeadError", "ResumeTargetDeadError",
-    "AuthenticationError", "RateLimitError", "NotSelectedError", "GameError"
+    "AuthenticationError", "RateLimitError", "NotSelectedError", "GameError",
+    "AgentTokenRequiredError", "AccountBlockedError"
 ]
