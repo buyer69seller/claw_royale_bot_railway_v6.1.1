@@ -54,18 +54,21 @@ SCORE_MOVE_BASE = 250
 # Cave escape priority
 SCORE_CAVE_EXIT = 1000
 
-# Document cache paths - PERBAIKI INI
+# Document cache paths - PERBAIKI PATH
 DOCS_TO_CACHE = [
     "/skill.md",
-    "/openapi.yaml", 
+    "/openapi.yaml",
     "/references/actions.md",
     "/references/game-loop.md",
     "/references/combat-items.md",
     "/references/game-systems.md",
     "/references/api-summary.md",
     "/references/errors.md",
+    "/references/changelog.md",
+    "/references/economy.md",
+    "/references/free-games.md",
+    "/references/paid-games.md",
 ]
-
 # AI Constants
 AI_LEARNING_RATE = 0.1
 AI_CONFIDENCE_THRESHOLD = 0.6
