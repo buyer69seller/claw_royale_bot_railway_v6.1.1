@@ -3,7 +3,7 @@
 
 import asyncio
 import logging
-import time
+import json
 from typing import Optional
 
 from websockets.exceptions import ConnectionClosed
@@ -19,13 +19,13 @@ from ..core.exceptions import (
     AgentDeadError,
     ResumeTargetDeadError,
     NotSelectedError,
-    TargetDeadError,
     AgentTokenRequiredError
 )
 from ..core.constants import (
     MIN_RETRY_DELAY,
     MAX_RETRY_DELAY,
     RETRY_BACKOFF_MULTIPLIER,
+    JOIN_WS
 )
 from ..core.config import ACTION_INTERVAL_SECONDS
 from ..ai.decision import DecisionEngine
@@ -45,7 +45,7 @@ class Driver:
         # AI Components
         self.ai = DecisionEngine()
         self.knowledge: Optional[KnowledgeBase] = None
-        self.auth_service = None  # Will be set from main
+        self.auth_service = None
 
         # Fallback strategy
         self.strategy = StrategyEngine()
@@ -127,19 +127,16 @@ class Driver:
         self.current_game = GameState(entry_type=entry_type)
 
         try:
+            import websockets
+
             # Get auth headers
             if not self.auth_service:
                 from ..services.auth_service import AuthService
                 self.auth_service = AuthService(self.rest)
 
             headers = await self.auth_service.get_websocket_auth()
-            
-            # Connect via WebSocket with auth
-            import websockets
-            import json
-            
-            from ..core.constants import JOIN_WS
-            
+
+            # Connect via WebSocket
             connection = await websockets.connect(
                 JOIN_WS,
                 additional_headers=headers,
@@ -147,63 +144,63 @@ class Driver:
                 ping_timeout=20,
                 close_timeout=5
             )
-            
+
             # Baca welcome frame
             welcome = json.loads(await connection.recv())
             decision = welcome.get("decision")
             logger.info(f"📨 Welcome decision: {decision}")
-            
+
             # Kirim hello
             hello = {"type": "hello", "entryType": entry_type}
             if entry_type == "paid":
                 hello["mode"] = "offchain"
             await connection.send(json.dumps(hello))
             logger.info(f"📤 Sent hello: {entry_type}")
-            
+
             # Tunggu response
             while True:
                 msg = json.loads(await connection.recv())
                 msg_type = msg.get("type")
-                
+
                 if msg_type in ("assigned", "joined"):
                     self.current_game.game_id = msg.get("gameId")
                     logger.info(f"✅ {msg_type} to game {self.current_game.game_id}")
-                    
+
                     # Wrap connection in WSClient
                     ws = WSClient(self.rest.api_key, self.rest.version)
                     ws._ws = connection
-                    
+
                     await self._play_game(ws)
                     return
-                    
+
                 elif msg_type == "not_selected":
                     logger.warning("❌ Not selected for game")
                     await asyncio.sleep(2)
                     return
-                    
+
                 elif msg_type == "queued":
                     logger.info("⏳ Queued, waiting for match...")
                     continue
-                    
+
                 elif msg_type == "waiting":
                     logger.info("⏳ Waiting for game...")
                     continue
-                    
+
                 elif msg_type == "error":
                     error = msg.get("error", {})
                     code = error.get("code")
                     message = error.get("message", "")
                     logger.error(f"❌ Server error: {code} - {message}")
-                    
+
                     if code == "AGENT_TOKEN_REQUIRED":
                         raise AgentTokenRequiredError("Agent token required!")
                     if code == "BLOCKED":
                         logger.warning("⛔ Account blocked - check API key")
                         await asyncio.sleep(5)
                         return
-                    
+
                     raise RuntimeError(f"Error from server: {msg}")
-                    
+
                 else:
                     logger.debug(f"📨 Unknown message: {msg_type}")
 
@@ -220,26 +217,20 @@ class Driver:
     async def _resume_game(self, entry_type: str):
         """Resume game yang sedang berjalan"""
         logger.info(f"🔄 Resuming {entry_type} game...")
-        
         try:
-            # Same as _start_game but with resume logic
             await self._start_game(entry_type)
-            
         except ResumeTargetDeadError:
             logger.info(f"{entry_type} resume target dead, re-dialing...")
             raise
 
-    # src/lifecycle/driver.py - update _play_game
+    async def _play_game(self, ws: WSClient):
+        """Loop gameplay dengan AI"""
+        logger.info("🎮 Starting AI-powered gameplay loop...")
 
-async def _play_game(self, ws: WSClient):
-    """Loop gameplay dengan AI"""
-    logger.info("🎮 Starting AI-powered gameplay loop...")
-
-    while True:
-        try:
-            # Gunakan ws.recv() yang sudah tersedia
-            msg = await ws.recv()
-            msg_type = msg.get("type")
+        while True:
+            try:
+                msg = await ws.recv()
+                msg_type = msg.get("type")
 
                 # Kematian
                 if msg_type == "agent_died":
@@ -364,7 +355,6 @@ async def _play_game(self, ws: WSClient):
 
         try:
             if self.ai_enabled:
-                # AI Decision
                 decision = await self.ai.decide(self.current_game)
 
                 logger.info(
@@ -374,7 +364,6 @@ async def _play_game(self, ws: WSClient):
                     f"Risk: {decision.risk_score:.2f})"
                 )
 
-                # Build action from AI decision
                 action = self._build_action_from_decision(decision)
 
                 if action:
@@ -388,7 +377,7 @@ async def _play_game(self, ws: WSClient):
                     await asyncio.sleep(ACTION_INTERVAL_SECONDS)
                     return
 
-            # Fallback to heuristic strategy
+            # Fallback
             await self._act_heuristic(ws, can_act)
 
         except Exception as e:
