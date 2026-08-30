@@ -354,22 +354,24 @@ class Driver:
                     continue
 
                 # ===== ACTION_RESULT =====
-                if msg_type == "action_result":
-                    self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
-                    error = msg.get("error")
-                    action = msg.get("action")
+    if msg_type == "action_result":
+        self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
+        error = msg.get("error")
+        action = msg.get("action")
 
-                    # Track item jika action adalah pickup
-                    if action and action.get("type") == "pickup":
-                        item_id = action.get("itemInstanceId")
-                        if error:
-                            if item_id:
-                                self.current_game.mark_item_attempted(item_id)
-                                logger.debug(f"❌ Pickup failed for {item_id[:8]}, marked as attempted")
-                        else:
-                            if item_id:
-                                self.current_game.mark_item_collected(item_id)
-                                logger.debug(f"✅ Pickup success for {item_id[:8]}, marked as collected")
+        # Track item jika action adalah pickup
+        if action and action.get("type") == "pickup":
+            item_id = action.get("itemInstanceId")
+            if error:
+                # Action gagal, mark item sebagai attempted dan collected (anggap sudah tidak ada)
+                if item_id:
+                    self.current_game.mark_item_attempted(item_id)
+                    self.current_game.mark_item_collected(item_id)  # <-- TAMBAH: anggap sudah tidak ada
+                    logger.debug(f"❌ Pickup failed for {item_id[:8]}, marked as collected (removed from cache)")
+            else:
+                if item_id:
+                    self.current_game.mark_item_collected(item_id)
+                    logger.debug(f"✅ Pickup success for {item_id[:8]}, marked as collected")
 
                     if error:
                         code = error.get("code")
