@@ -61,30 +61,36 @@ class Driver:
         self.total_actions = 0
         self.successful_actions = 0
 
-# src/lifecycle/driver.py - tambahkan di run() method
-
     async def run(self):
         """Loop utama driver"""
+        logger.info("🚀 Driver run() started!")  # <-- DEBUG
         self.delay = MIN_RETRY_DELAY
         self.start_time = __import__('time').time()
+        logger.info(f"⏰ Start time: {self.start_time}")  # <-- DEBUG
+
+        loop_count = 0  # <-- DEBUG
 
         while True:
+            loop_count += 1
+            logger.info(f"🔄 Driver loop iteration #{loop_count}")  # <-- DEBUG
+
             try:
-                logger.info("🔄 Driver loop iteration...")  # <-- TAMBAH DEBUG
-                
                 # Update version
+                logger.info("📥 Checking version...")  # <-- DEBUG
                 await self.version_mgr.ensure_current(self.rest._session)
+                logger.info(f"✅ Version: {self.version_mgr.version}")  # <-- DEBUG
 
                 # Determine state
+                logger.info("🔍 Determining game state...")  # <-- DEBUG
                 state_info = await self.router.resolve_state()
                 logger.info(f"📊 State: {state_info['state']} -> {state_info['action']}")
 
                 # Execute based on state
                 if state_info["action"] in ["start_free", "start_paid"]:
-                    logger.info(f"🎮 Attempting to join game: {state_info['action']}")  # <-- TAMBAH DEBUG
+                    logger.info(f"🎮 Attempting to join game: {state_info['action']}")
                     await self._start_game(state_info["entry_type"])
                 elif state_info["action"] in ["resume_free", "resume_paid"]:
-                    logger.info(f"🔄 Attempting to resume game: {state_info['action']}")  # <-- TAMBAH DEBUG
+                    logger.info(f"🔄 Attempting to resume game: {state_info['action']}")
                     await self._resume_game(state_info["entry_type"])
                 elif state_info["action"] == "idle":
                     logger.info("⏳ Idle, waiting for game...")
@@ -92,6 +98,9 @@ class Driver:
                 elif state_info["action"] == "error":
                     logger.warning("⚠️ Error state, waiting...")
                     await asyncio.sleep(10)
+                else:
+                    logger.warning(f"⚠️ Unknown action: {state_info['action']}")
+                    await asyncio.sleep(2)
 
                 self.delay = MIN_RETRY_DELAY
 
@@ -118,6 +127,16 @@ class Driver:
                     })
                 self.current_game = None
                 self.strategy.reset_rejection_counter()
+                # Reset hybrid AI stats
+                self.ai.stats = {
+                    "decisions_made": 0,
+                    "ai_decisions": 0,
+                    "heuristic_decisions": 0,
+                    "survival_priority": 0,
+                    "kill_priority": 0,
+                    "loot_priority": 0,
+                    "explore_priority": 0
+                }
                 await asyncio.sleep(1)
                 self.delay = MIN_RETRY_DELAY
 
@@ -135,34 +154,34 @@ class Driver:
 
             except Exception as e:
                 logger.exception(f"💥 Driver error: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
                 await asyncio.sleep(self.delay)
                 self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
-
-# src/lifecycle/driver.py - perbaiki _start_game
 
     async def _start_game(self, entry_type: str):
         """Mulai game baru - via WebSocket dengan Hybrid AI"""
         logger.info(f"🎮 Joining {entry_type} game...")
-        logger.info(f"🔑 API Key: {self.rest.api_key[:10]}...")  # <-- TAMBAH DEBUG
-        
+        logger.info(f"🔑 API Key: {self.rest.api_key[:10]}...")
+
         try:
             # Pastikan auth_service ada
             if not self.auth_service:
                 from ..services.auth_service import AuthService
                 self.auth_service = AuthService(self.rest)
-                logger.info("✅ Auth service initialized")  # <-- TAMBAH DEBUG
-            
+                logger.info("✅ Auth service initialized")
+
             # Dapatkan headers
             headers = await self.auth_service.get_websocket_auth()
-            logger.info(f"📨 Headers: {headers}")  # <-- TAMBAH DEBUG
-            
+            logger.info(f"📨 Headers: {headers}")
+
             # Connect via WebSocket
             import websockets
             import json
             from ..core.constants import JOIN_WS
-            
-            logger.info(f"🔗 Connecting to {JOIN_WS}...")  # <-- TAMBAH DEBUG
-            
+
+            logger.info(f"🔗 Connecting to {JOIN_WS}...")
+
             connection = await websockets.connect(
                 JOIN_WS,
                 additional_headers=headers,
@@ -170,74 +189,75 @@ class Driver:
                 ping_timeout=20,
                 close_timeout=5
             )
-            logger.info("✅ WebSocket connected!")  # <-- TAMBAH DEBUG
-            
+            logger.info("✅ WebSocket connected!")
+
             # Baca welcome frame
             welcome = json.loads(await connection.recv())
             decision = welcome.get("decision")
             logger.info(f"📨 Welcome decision: {decision}")
-            
+
             # Kirim hello
             hello = {"type": "hello", "entryType": entry_type}
             if entry_type == "paid":
                 hello["mode"] = "offchain"
             await connection.send(json.dumps(hello))
             logger.info(f"📤 Sent hello: {entry_type}")
-            
+
             # Tunggu response
             while True:
                 msg = json.loads(await connection.recv())
                 msg_type = msg.get("type")
-                logger.info(f"📨 Received: {msg_type}")  # <-- TAMBAH DEBUG
-                
+                logger.info(f"📨 Received: {msg_type}")
+
                 if msg_type in ("assigned", "joined"):
-                    self.current_game = GameState(entry_type=entry_type)  # <-- FIX: reassign
+                    self.current_game = GameState(entry_type=entry_type)
                     self.current_game.game_id = msg.get("gameId")
+                    self.game_count += 1
                     logger.info(f"✅ {msg_type} to game {self.current_game.game_id}")
-                    
+
                     # Wrap connection in WSClient
                     ws = WSClient(self.rest.api_key, self.rest.version)
                     ws._ws = connection
-                    
+
                     # Start gameplay with Hybrid AI
                     await self._play_game(ws)
                     return
-                    
+
                 elif msg_type == "not_selected":
                     logger.warning("❌ Not selected for game")
                     await asyncio.sleep(2)
                     return
-                    
+
                 elif msg_type == "queued":
                     logger.info("⏳ Queued, waiting for match...")
                     continue
-                    
+
                 elif msg_type == "waiting":
                     logger.info("⏳ Waiting for game...")
                     continue
-                    
+
                 elif msg_type == "error":
                     error = msg.get("error", {})
                     code = error.get("code")
                     message = error.get("message", "")
                     logger.error(f"❌ Server error: {code} - {message}")
-                    
+
                     if code == "AGENT_TOKEN_REQUIRED":
                         raise AgentTokenRequiredError("Agent token required!")
                     if code == "BLOCKED":
                         logger.warning("⛔ Account blocked - check API key")
                         await asyncio.sleep(5)
                         return
-                    
+
                     raise RuntimeError(f"Error from server: {msg}")
-                    
+
                 else:
                     logger.debug(f"📨 Unknown message: {msg_type}")
-                    
+
         except Exception as e:
             logger.error(f"❌ Failed to join game: {e}")
             import traceback
-            logger.error(traceback.format_exc())  # <-- TAMBAH DEBUG
+            logger.error(traceback.format_exc())
             raise
 
     async def _resume_game(self, entry_type: str):
@@ -281,7 +301,6 @@ class Driver:
                             "kills": self.current_game.kills,
                             "survival_time": self.current_game.survival_time
                         })
-                    # Log Hybrid AI stats
                     self._log_hybrid_stats()
                     break
 
@@ -294,7 +313,6 @@ class Driver:
                             "kills": self.current_game.kills,
                             "survival_time": self.current_game.survival_time
                         })
-                    # Log Hybrid AI stats
                     self._log_hybrid_stats()
                     break
 
@@ -332,7 +350,6 @@ class Driver:
                         self.current_game.update_view(view, "action_rejected")
                     self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
                     if view and self.current_game.is_alive:
-                        # Recompute with Hybrid AI
                         await self._act(ws, self.current_game.can_act)
                     continue
 
@@ -364,14 +381,12 @@ class Driver:
                                 await self._act(ws, self.current_game.can_act)
                             continue
 
-                    # Track successful action
                     if msg.get("action"):
                         self.total_actions += 1
                         self.successful_actions += 1
                         self.strategy.reset_rejection_counter()
                     continue
 
-                # Unknown message
                 logger.debug(f"📨 Unknown message type: {msg_type}")
 
             except ResumeTargetDeadError:
@@ -469,7 +484,6 @@ class Driver:
             for enemy in self.current_game.get_enemies():
                 if enemy.get("id") == target_id or enemy.get("agentId") == target_id:
                     return enemy
-                # Cek juga di metadata
                 if enemy.get("metadata", {}).get("id") == target_id:
                     return enemy
 
