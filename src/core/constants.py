@@ -1,4 +1,6 @@
 # src/core/constants.py
+"""Konstanta global untuk bot Claw Royale"""
+
 import os
 from pathlib import Path
 
@@ -15,11 +17,11 @@ def ensure_directories():
     for d in [CACHE_DIR, LOG_DIR]:
         Path(d).mkdir(parents=True, exist_ok=True)
 
-# API Endpoints - PERBAIKI INI
+# API Endpoints
 BASE_API = "https://cdn.clawroyale.ai/api"
 JOIN_WS = "wss://cdn.clawroyale.ai/ws/join"
 AGENT_WS = "wss://cdn.clawroyale.ai/ws/agent"
-API_VERSION_URL = f"{BASE_API}/version"  # <-- PERBAIKI: /version bukan /api/version
+API_VERSION_URL = f"{BASE_API}/version"
 
 # Default values
 DEFAULT_ENTRY_TYPE = "free"
@@ -34,6 +36,9 @@ MIN_RETRY_DELAY = 1.0
 MAX_RETRY_DELAY = 30.0
 RETRY_BACKOFF_MULTIPLIER = 2.0
 RECONNECT_RESET_THRESHOLD = 10.0
+
+# Auto-equip configuration
+AUTO_EQUIP_INTERVAL_GAMES = 5  # Check auto-equip every N games
 
 # Strategy scoring - Survival-first
 SCORE_HEAL_BASE = 900
@@ -54,7 +59,7 @@ SCORE_MOVE_BASE = 250
 # Cave escape priority
 SCORE_CAVE_EXIT = 1000
 
-# Document cache paths - PERBAIKI PATH
+# Document cache paths
 DOCS_TO_CACHE = [
     "/skill.md",
     "/openapi.yaml",
@@ -69,6 +74,7 @@ DOCS_TO_CACHE = [
     "/references/free-games.md",
     "/references/paid-games.md",
 ]
+
 # AI Constants
 AI_LEARNING_RATE = 0.1
 AI_CONFIDENCE_THRESHOLD = 0.6
