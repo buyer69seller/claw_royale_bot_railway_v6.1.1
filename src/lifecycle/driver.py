@@ -110,40 +110,74 @@ class Driver:
                 await asyncio.sleep(self.delay)
                 self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
 
-    async def _start_game(self, entry_type: str):
-        """Mulai game baru"""
-        logger.info(f"Starting new {entry_type} game...")
-        self.current_game = GameState(entry_type=entry_type)
+    # src/lifecycle/driver.py - tambahkan method untuk join langsung
 
-        try:
-            async with WSClient(self.rest.api_key, self.rest.version) as ws:
-                welcome = await ws.recv()
-                logger.info(f"Welcome decision: {welcome.get('decision')}")
-                await ws.send_hello(entry_type)
+async def _start_game(self, entry_type: str):
+    """Mulai game baru - langsung via WebSocket"""
+    logger.info(f"🎮 Joining {entry_type} game via WebSocket...")
+    self.current_game = GameState(entry_type=entry_type)
 
-                while True:
-                    msg = await ws.recv()
-                    msg_type = msg.get("type")
+    try:
+        async with WSClient(self.rest.api_key, self.rest.version) as ws:
+            # Baca welcome
+            welcome = await ws.recv()
+            decision = welcome.get("decision")
+            logger.info(f"📨 Welcome decision: {decision}")
+            
+            # Kirim hello - entry type
+            await ws.send_hello(entry_type)
+            
+            # Tunggu response
+            while True:
+                msg = await ws.recv()
+                msg_type = msg.get("type")
+                
+                if msg_type in ("assigned", "joined"):
+                    self.current_game.game_id = msg.get("gameId")
+                    logger.info(f"✅ {msg_type} to game {self.current_game.game_id}")
+                    await self._play_game(ws)
+                    return
+                    
+                elif msg_type == "not_selected":
+                    logger.warning("❌ Not selected for game, retrying...")
+                    await asyncio.sleep(2)
+                    return
+                    
+                elif msg_type == "queued":
+                    logger.info("⏳ Queued, waiting for match...")
+                    continue
+                    
+                elif msg_type == "waiting":
+                    logger.info("⏳ Waiting for game...")
+                    continue
+                    
+                elif msg_type == "error":
+                    error = msg.get("error", {})
+                    code = error.get("code")
+                    message = error.get("message", "")
+                    logger.error(f"❌ Server error: {code} - {message}")
+                    
+                    # Jika BLOCKED, coba free game
+                    if code == "BLOCKED":
+                        logger.info("🔄 Blocked for paid, trying free...")
+                        if entry_type == "paid":
+                            await ws.send_hello("free")
+                            continue
+                    
+                    raise RuntimeError(f"Error from server: {msg}")
+                    
+                else:
+                    logger.debug(f"📨 Unknown message: {msg_type}")
 
-                    if msg_type in ("assigned", "joined"):
-                        self.current_game.game_id = msg.get("gameId")
-                        logger.info(f"{msg_type} to game {self.current_game.game_id}")
-                        await self._play_game(ws)
-                        return
-
-                    elif msg_type == "not_selected":
-                        raise NotSelectedError("Not selected for game")
-                    elif msg_type == "error":
-                        raise RuntimeError(f"Error from server: {msg}")
-                    elif msg_type in ("queued", "waiting"):
-                        continue
-
-        except ResumeTargetDeadError:
-            if entry_type == "free":
-                logger.info("Free game target dead, fallback to matchmaking...")
-                raise
-            else:
-                raise
+    except ResumeTargetDeadError:
+        if entry_type == "free":
+            logger.info("🔄 Free game target dead, fallback to matchmaking...")
+            raise
+        else:
+            raise
+    except Exception as e:
+        logger.error(f"❌ Failed to join game: {e}")
+        raise
 
     async def _resume_game(self, entry_type: str):
         """Resume game yang sedang berjalan"""
