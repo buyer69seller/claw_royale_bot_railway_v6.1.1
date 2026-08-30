@@ -10,14 +10,15 @@ from pathlib import Path
 # Tambahkan src ke path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from client.rest_client import RestClient
-from lifecycle.driver import Driver
-from core.config import API_KEY
-from utils.logger import setup_logging
-from services.reward_service import RewardService
-from services.loadout_service import LoadoutService
-from utils.health import HealthServer
-from ai.knowledge import KnowledgeBase
+# Ubah ke relative import
+from .client.rest_client import RestClient
+from .lifecycle.driver import Driver
+from .core.config import API_KEY
+from .utils.logger import setup_logging
+from .services.reward_service import RewardService
+from .services.loadout_service import LoadoutService
+from .utils.health import HealthServer
+from .ai.knowledge import KnowledgeBase
 
 # Global untuk cleanup
 health_server = None
