@@ -4,14 +4,18 @@ from .analyzer import GameAnalyzer
 from .decision import DecisionEngine, AIDecision
 from .knowledge import KnowledgeBase
 from .risk import RiskAssessor
+from .hybrid_engine import HybridAIEngine, ThreatAssessment, PriorityDecision
 
 __all__ = [
     "PerceptionEngine",
-    "PerceivedState", 
+    "PerceivedState",
     "PerceivedEntity",
     "GameAnalyzer",
     "DecisionEngine",
     "AIDecision",
     "KnowledgeBase",
-    "RiskAssessor"
+    "RiskAssessor",
+    "HybridAIEngine",
+    "ThreatAssessment",
+    "PriorityDecision"
 ]
