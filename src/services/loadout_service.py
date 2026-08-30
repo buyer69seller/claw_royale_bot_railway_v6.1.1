@@ -1,6 +1,4 @@
 # src/services/loadout_service.py
-"""Service untuk manajemen loadout"""
-
 import logging
 from typing import Dict, Any, Optional, List
 
@@ -21,7 +19,7 @@ class LoadoutService:
             self._current_loadout = loadout
             return loadout
         except Exception as e:
-            logger.error(f"Failed to get loadout: {e}")
+            logger.warning(f"Could not get loadout: {e}")
             return {}
     
     async def is_full_set(self) -> bool:
@@ -64,8 +62,8 @@ class LoadoutService:
             return result
             
         except Exception as e:
-            logger.error(f"Failed to optimize loadout: {e}")
-            return {"error": str(e)}
+            logger.debug(f"Loadout optimization skipped: {e}")
+            return {"error": str(e), "changes": []}
     
     @staticmethod
     def _find_best_pack(inventory: Dict, slot: str) -> Optional[Dict]:
