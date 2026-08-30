@@ -8,9 +8,8 @@ from typing import Optional, Dict, Any, AsyncIterator
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-# src/client/rest_client.py
-from ..core.constants import BASE_API
-from ..core.exceptions import AuthenticationError, VersionMismatchError, ClawRoyaleError
+from ..core.constants import JOIN_WS
+from ..core.exceptions import AuthenticationError, ResumeTargetDeadError
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +53,6 @@ class WSClient:
                         msg = json.loads(await ws.recv())
                         yield msg
                     except ConnectionClosed as e:
-                        # Cek apakah ini resume target dead
                         if e.code == 1013 and "RESUME_TARGET_DEAD" in str(e.reason):
                             raise ResumeTargetDeadError(f"Resume target dead: {e.reason}")
                         logger.warning(f"Connection closed: {e.code} - {e.reason}")
@@ -62,6 +60,18 @@ class WSClient:
         except websockets.exceptions.InvalidStatusCode as e:
             if e.status_code == 403:
                 raise AuthenticationError("Not primary agent or forbidden")
+            raise
+    
+    async def recv(self) -> Dict:
+        """Receive message dari WebSocket"""
+        if not self._ws:
+            raise RuntimeError("Not connected")
+        try:
+            msg = await self._ws.recv()
+            return json.loads(msg)
+        except ConnectionClosed as e:
+            if e.code == 1013 and "RESUME_TARGET_DEAD" in str(e.reason):
+                raise ResumeTargetDeadError(f"Resume target dead: {e.reason}")
             raise
     
     async def send(self, data: Dict):
@@ -81,7 +91,7 @@ class WSClient:
         if entry_type == "paid":
             hello["mode"] = mode
         await self.send(hello)
-        logger.info(f"Sent hello: {entry_type}" + (f" mode={mode}" if entry_type == "paid" else ""))
+        logger.info(f"📤 Sent hello: {entry_type}" + (f" mode={mode}" if entry_type == "paid" else ""))
     
     async def send_action(self, data: Dict, thought: str = "AI Adaptive Strategy"):
         """Kirim action ke game"""
@@ -97,3 +107,8 @@ class WSClient:
             return False
         import time
         return (time.time() - self._connected_at) >= 10.0
+    
+    # Alias untuk kompatibilitas
+    async def receive(self) -> Dict:
+        """Alias untuk recv"""
+        return await self.recv()
