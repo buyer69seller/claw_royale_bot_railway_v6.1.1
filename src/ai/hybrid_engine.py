@@ -1,5 +1,5 @@
 # src/ai/hybrid_engine.py
-"""Hybrid AI Engine - Gabungan AI Auto-Pilot + Competitive v7"""
+"""Hybrid AI Engine - Gabungan AI Auto-Pilot + Competitive v7 dengan Item Tracking"""
 
 import logging
 import math
@@ -46,6 +46,7 @@ class HybridAIEngine:
     Hybrid AI Engine - Menggabungkan:
     1. AI Auto-Pilot (ML/Neural)
     2. Competitive v7 (Heuristic/Priority)
+    3. Item Tracking & Validation
     """
     
     def __init__(self):
@@ -74,7 +75,7 @@ class HybridAIEngine:
         Hybrid decision making:
         1. AI Analysis (ML-based)
         2. Threat Assessment (v7)
-        3. Priority-based selection (v7)
+        3. Priority-based selection (v7) dengan Item Tracking
         4. Final decision (AI + Heuristic)
         """
         self.turn += 1
@@ -85,7 +86,7 @@ class HybridAIEngine:
         # Step 2: Threat Assessment (v7)
         threat = await self._assess_threat(perceived, state)
         
-        # Step 3: Priority Decision (v7)
+        # Step 3: Priority Decision (v7) dengan Item Tracking
         priority_decision = await self._priority_decision(perceived, state, threat)
         
         # Step 4: AI Decision (ML)
@@ -109,6 +110,11 @@ class HybridAIEngine:
             self.stats["ai_decisions"] += 1
         else:
             self.stats["heuristic_decisions"] += 1
+        
+        # Log item stats periodically
+        if self.turn % 10 == 0:
+            item_stats = state.get_item_stats()
+            logger.debug(f"📊 Item Stats: {item_stats}")
         
         logger.info(
             f"🧠 Hybrid AI: {final_decision.action_type} "
@@ -199,7 +205,9 @@ class HybridAIEngine:
         return threat
     
     async def _priority_decision(self, perceived: PerceivedState, state: GameState, threat: Dict) -> PriorityDecision:
-        """v7 Priority-based decision"""
+        """
+        v7 Priority-based decision dengan Item Tracking
+        """
         
         # Get self
         me = state.get_self()
@@ -210,16 +218,20 @@ class HybridAIEngine:
         
         # === PRIORITY 1: SURVIVAL ===
         
-        # HP < 30% → HEAL
+        # HP < 30% → HEAL (gunakan get_healing_items)
         if hp_ratio < 0.3:
-            for item in state.get_items():
+            healing_items = state.get_healing_items()
+            for item in healing_items:
                 heal = float(item.get("heal", item.get("healAmount", 0)))
                 if heal > 0:
                     self.stats["survival_priority"] += 1
+                    item_id = item.get("instanceId") or item.get("id")
+                    # Mark as attempted
+                    state.mark_item_attempted(item_id)
                     return PriorityDecision(
                         priority=1,
                         action_type="pickup",
-                        target_id=item.get("instanceId") or item.get("id"),
+                        target_id=item_id,
                         reasoning=f"Critical HP ({hp_ratio:.0%}) - healing",
                         confidence=0.95
                     )
@@ -276,40 +288,28 @@ class HybridAIEngine:
                         confidence=0.85
                     )
         
-        # === PRIORITY 2: LOOT ===
+        # === PRIORITY 2: LOOT (gunakan get_loot_items) ===
         
         # Collect items in range
-        for item in state.get_items():
-            distance = self._distance(me, item)
+        loot_items = state.get_loot_items()
+        for item in loot_items:
+            distance = self._distance(state.get_self(), item)
             if distance < 3:
-                item_type = str(item.get("type", item.get("itemType", ""))).lower()
-                value = float(item.get("value", item.get("rarityValue", 0)))
-                
-                # Prioritaskan: Relic > Pack > Potion > sMoltz
-                priority_score = 0
-                if "relic" in item_type:
-                    priority_score = 4
-                elif "pack" in item_type:
-                    priority_score = 3
-                elif "potion" in item_type or "herb" in item_type:
-                    priority_score = 2
-                else:
-                    priority_score = 1
-                
-                # Only loot if safe enough
-                if threat["risk_score"] < 0.5 or priority_score > 2:
-                    self.stats["loot_priority"] += 1
-                    return PriorityDecision(
-                        priority=2,
-                        action_type="pickup",
-                        target_id=item.get("instanceId") or item.get("id"),
-                        reasoning=f"Collecting {item_type} (value: {value})",
-                        confidence=0.8
-                    )
+                self.stats["loot_priority"] += 1
+                item_id = item.get("instanceId") or item.get("id")
+                # Mark as attempted
+                state.mark_item_attempted(item_id)
+                return PriorityDecision(
+                    priority=2,
+                    action_type="pickup",
+                    target_id=item_id,
+                    reasoning=f"Collecting loot",
+                    confidence=0.8
+                )
         
         # Move to items in range (distance < 5)
-        for item in state.get_items():
-            distance = self._distance(me, item)
+        for item in loot_items:
+            distance = self._distance(state.get_self(), item)
             if distance < 5 and threat["risk_score"] < 0.4:
                 self.stats["loot_priority"] += 1
                 return PriorityDecision(
@@ -322,21 +322,17 @@ class HybridAIEngine:
         
         # === PRIORITY 3: KILL ===
         
-        # Only if HP > 50%
         if hp_ratio > 0.5 and threat["should_fight"]:
             enemies = state.get_enemies()
             if enemies:
-                # Target: HP terendah dalam range
                 targetable = [
                     e for e in enemies 
-                    if self._distance(me, e) < 10
+                    if self._distance(state.get_self(), e) < 10
                 ]
                 if targetable:
-                    # Sort by HP (lowest first)
                     targetable.sort(key=lambda e: float(e.get("hp", 0)))
                     target = targetable[0]
                     
-                    # Check kill probability
                     target_hp = float(target.get("hp", 0))
                     target_def = float(target.get("defense", target.get("def", 0)))
                     kill_prob = (my_atk - target_def) / max(target_hp, 1)
@@ -353,9 +349,8 @@ class HybridAIEngine:
         
         # === PRIORITY 4: EXPLORE ===
         
-        # Ruin in range (distance < 2)
         for obj in state.get_interactables():
-            distance = self._distance(me, obj)
+            distance = self._distance(state.get_self(), obj)
             if distance < 2 and "ruin" in str(obj.get("type", obj.get("kind", ""))):
                 self.stats["explore_priority"] += 1
                 return PriorityDecision(
@@ -366,9 +361,8 @@ class HybridAIEngine:
                     confidence=0.75
                 )
         
-        # Ruin in range (distance < 5)
         for obj in state.get_interactables():
-            distance = self._distance(me, obj)
+            distance = self._distance(state.get_self(), obj)
             if distance < 5 and "ruin" in str(obj.get("type", obj.get("kind", ""))):
                 self.stats["explore_priority"] += 1
                 return PriorityDecision(
@@ -381,7 +375,6 @@ class HybridAIEngine:
         
         # === FALLBACK: MOVE TOWARDS CENTER ===
         
-        # Move to center (safer)
         for conn in state.get_connections():
             if conn.get("safetyScore", 0) > 0.5:
                 return PriorityDecision(
@@ -392,7 +385,6 @@ class HybridAIEngine:
                     confidence=0.5
                 )
         
-        # Last resort: move to any connection
         for conn in state.get_connections():
             if not conn.get("insideDeathZone", False):
                 return PriorityDecision(
@@ -443,29 +435,37 @@ class HybridAIEngine:
         # Default: AI decision
         return ai
     
-    def _distance(self, obj1: Dict, obj2: Dict) -> float:
+    def _distance(self, obj1, obj2) -> float:
         """Hitung distance antara dua object"""
         try:
-            # Handle jika objek adalah string (ID)
-            if isinstance(obj1, str):
-                obj1 = {"x": 0, "y": 0}
-            if isinstance(obj2, str):
-                obj2 = {"x": 0, "y": 0}
+            # Handle berbagai tipe data
+            if obj1 is None or obj2 is None:
+                return 999.0
             
-            # Jika objek adalah list, ambil yang pertama
-            if isinstance(obj1, list) and len(obj1) > 0:
-                obj1 = obj1[0] if isinstance(obj1[0], dict) else {"x": 0, "y": 0}
-            if isinstance(obj2, list) and len(obj2) > 0:
-                obj2 = obj2[0] if isinstance(obj2[0], dict) else {"x": 0, "y": 0}
+            # Jika objek adalah string (ID), return large distance
+            if isinstance(obj1, str) or isinstance(obj2, str):
+                return 999.0
             
+            # Jika objek adalah list, ambil elemen pertama jika ada
+            if isinstance(obj1, list):
+                obj1 = obj1[0] if obj1 else {}
+            if isinstance(obj2, list):
+                obj2 = obj2[0] if obj2 else {}
+            
+            # Jika bukan dictionary, return large distance
+            if not isinstance(obj1, dict) or not isinstance(obj2, dict):
+                return 999.0
+            
+            # Ambil posisi
             x1 = float(obj1.get("x", obj1.get("position", {}).get("x", 0)))
             y1 = float(obj1.get("y", obj1.get("position", {}).get("y", 0)))
             x2 = float(obj2.get("x", obj2.get("position", {}).get("x", 0)))
             y2 = float(obj2.get("y", obj2.get("position", {}).get("y", 0)))
+            
             return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
         except Exception as e:
             logger.debug(f"Distance calculation error: {e}")
-            return 999.0  # Return large distance if error
+            return 999.0
     
     def get_stats(self) -> Dict:
         """Dapatkan statistik decision"""
