@@ -6,6 +6,7 @@ import json
 import logging
 from typing import Optional, Dict, Any
 
+# src/client/rest_client.py
 from ..core.constants import BASE_API
 from ..core.exceptions import AuthenticationError, VersionMismatchError, ClawRoyaleError
 
