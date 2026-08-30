@@ -121,10 +121,15 @@ class GameState:
         - Item dalam jangkauan (distance < 5)
         - Item belum dicoba/dikoleksi
         - Item masih ada di cache
+        - Item masih ada di view
         """
         items = self.get_items()
         valid_items = []
         me = self.get_self()
+        
+        if not items:
+            logger.debug("📭 No items in current view")
+            return []
         
         for item in items:
             item_id = item.get("instanceId") or item.get("id")
@@ -132,8 +137,12 @@ class GameState:
                 continue
             
             # Skip jika sudah dicoba atau sudah dikoleksi
-            if item_id in self.attempted_items or item_id in self.collected_items:
-                logger.debug(f"⏭️ Item {item_id[:8]} skipped (attempted/collected)")
+            if item_id in self.attempted_items:
+                logger.debug(f"⏭️ Item {item_id[:8]} already attempted")
+                continue
+            
+            if item_id in self.collected_items:
+                logger.debug(f"⏭️ Item {item_id[:8]} already collected")
                 continue
             
             # Cek jarak
