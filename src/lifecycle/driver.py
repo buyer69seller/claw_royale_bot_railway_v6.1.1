@@ -26,7 +26,8 @@ from ..core.constants import (
     MAX_RETRY_DELAY,
     RETRY_BACKOFF_MULTIPLIER,
     JOIN_WS,
-    ACTION_INTERVAL_SECONDS
+    ACTION_INTERVAL_SECONDS,
+    AUTO_EQUIP_INTERVAL_GAMES
 )
 from ..ai.hybrid_engine import HybridAIEngine
 from ..ai.knowledge import KnowledgeBase
@@ -60,6 +61,11 @@ class Driver:
         self.start_time = None
         self.total_actions = 0
         self.successful_actions = 0
+
+        # Auto-equip tracking
+        self.games_since_equip = 0
+        self.auto_equip_interval = AUTO_EQUIP_INTERVAL_GAMES  # Check every N games
+        self.last_equip_result = None
 
     async def run(self):
         """Loop utama driver"""
@@ -159,12 +165,41 @@ class Driver:
                 await asyncio.sleep(self.delay)
                 self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
 
+    async def _auto_equip_if_needed(self):
+        """Auto-equip items periodically"""
+        try:
+            self.games_since_equip += 1
+            
+            # Check if it's time to auto-equip
+            if self.games_since_equip >= self.auto_equip_interval:
+                self.games_since_equip = 0
+                
+                logger.info("🔧 Running periodic auto-equip...")
+                from ..services.loadout_service import LoadoutService
+                loadout_service = LoadoutService(self.rest)
+                
+                result = await loadout_service.auto_equip_best_items()
+                self.last_equip_result = result
+                
+                if result.get("changes"):
+                    logger.info(f"✅ Periodically equipped: {', '.join(result['changes'])}")
+                elif result.get("error"):
+                    logger.warning(f"⚠️ Auto-equip error: {result.get('error')}")
+                else:
+                    logger.info("✅ Loadout already optimal")
+                    
+        except Exception as e:
+            logger.debug(f"Periodic auto-equip skipped: {e}")
+
     async def _start_game(self, entry_type: str):
         """Mulai game baru - via WebSocket dengan Hybrid AI"""
         logger.info(f"🎮 Joining {entry_type} game...")
         logger.info(f"🔑 API Key: {self.rest.api_key[:10]}...")
 
         try:
+            # Run auto-equip before joining game
+            await self._auto_equip_if_needed()
+
             if not self.auth_service:
                 from ..services.auth_service import AuthService
                 self.auth_service = AuthService(self.rest)
@@ -287,7 +322,6 @@ class Driver:
                         raise AgentDeadError("You died!")
                     
                     # Agent lain mati - IGNORE, lanjutkan
-                    # Jangan log setiap kali, hanya jika perlu
                     continue
 
                 # ===== GAME SELESAI =====
@@ -400,7 +434,13 @@ class Driver:
                         if error:
                             if item_id:
                                 self.current_game.mark_item_attempted(item_id)
-                                logger.debug(f"❌ Pickup failed for {item_id[:8]}, marked as attempted")
+                                self.current_game.mark_item_collected(item_id)
+                                logger.debug(f"❌ Pickup failed for {item_id[:8]}, marked as collected")
+                                
+                                # Coba ambil item lain di turn yang sama
+                                if self.current_game.can_act:
+                                    logger.info("🔄 Trying another item in same turn...")
+                                    await self._act(ws, True)
                         else:
                             if item_id:
                                 self.current_game.mark_item_collected(item_id)
@@ -587,6 +627,12 @@ class Driver:
         logger.info(f"   Explore Priority: {stats.get('explore_priority', 0)}")
         logger.info(f"   Total Actions: {self.total_actions}")
         logger.info(f"   Success Rate: {self.successful_actions / max(self.total_actions, 1) * 100:.1f}%")
+        
+        # Log auto-equip status
+        if self.last_equip_result:
+            changes = self.last_equip_result.get("changes", [])
+            if changes:
+                logger.info(f"   Last Equip: {', '.join(changes)}")
         logger.info("=" * 60)
 
     def get_performance(self) -> Dict[str, Any]:
@@ -600,5 +646,9 @@ class Driver:
             "success_rate": self.successful_actions / max(self.total_actions, 1),
             "hybrid_stats": self.ai.get_stats() if hasattr(self.ai, 'get_stats') else {},
             "current_state": self.current_game.entry_type if self.current_game else "none",
-            "is_in_game": self.current_game is not None and self.current_game.is_alive
+            "is_in_game": self.current_game is not None and self.current_game.is_alive,
+            "auto_equip": {
+                "games_since_equip": self.games_since_equip,
+                "last_equip_changes": self.last_equip_result.get("changes", []) if self.last_equip_result else []
+            }
         }
