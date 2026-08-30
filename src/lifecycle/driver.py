@@ -22,13 +22,17 @@ from ..core.exceptions import (
 from ..core.constants import (
     MIN_RETRY_DELAY, MAX_RETRY_DELAY, 
     RETRY_BACKOFF_MULTIPLIER,
-    ACTION_INTERVAL_SECONDS
+    # HAPUS ACTION_INTERVAL_SECONDS dari sini
 )
+# Ambil dari config
+from ..core.config import ACTION_INTERVAL_SECONDS
 from ..ai.decision import DecisionEngine
 from ..ai.knowledge import KnowledgeBase
 
 logger = logging.getLogger(__name__)
 
+class Driver:
+    # ... rest of code
 class Driver:
     def __init__(self, rest_client: RestClient):
         self.rest = rest_client
