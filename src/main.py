@@ -59,13 +59,13 @@ async def main():
     """Main entry point"""
     global health_server, driver_task, knowledge
 
+    # Setup logging FIRST
+    setup_logging()
+    logger = logging.getLogger(__name__)  # <-- INI HARUS PERTAMA
+
     # Ensure directories exist
     ensure_directories()
     logger.info("📁 Directories ensured")
-
-    # Setup logging
-    setup_logging()
-    logger = logging.getLogger(__name__)
 
     # Cek API key
     if not API_KEY:
@@ -165,6 +165,10 @@ async def main():
 
 
 if __name__ == "__main__":
+    # Setup logging FIRST before anything else
+    setup_logging()
+    logger = logging.getLogger(__name__)
+    
     print("=" * 60)
     print("🦀 Claw Royale Bot v6.1 - Hybrid AI")
     print("🧠 AI Engine: AI Auto-Pilot + Competitive v7")
@@ -183,15 +187,15 @@ if __name__ == "__main__":
     try:
         loop.run_until_complete(main())
     except KeyboardInterrupt:
-        logging.info("🛑 Bot stopped by user (KeyboardInterrupt)")
+        logger.info("🛑 Bot stopped by user (KeyboardInterrupt)")
     except Exception as e:
-        logging.error(f"💥 Fatal error: {e}")
+        logger.error(f"💥 Fatal error: {e}")
         import traceback
-        logging.error(traceback.format_exc())
+        logger.error(traceback.format_exc())
     finally:
         if knowledge:
             knowledge.save()
-            logging.info("💾 Final knowledge saved")
+            logger.info("💾 Final knowledge saved")
         loop.close()
-        logging.info("✅ Loop closed, exiting")
+        logger.info("✅ Loop closed, exiting")
         sys.exit(0)
