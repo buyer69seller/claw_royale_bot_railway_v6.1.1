@@ -10,8 +10,6 @@ from ..core.exceptions import AuthenticationError, VersionMismatchError, ClawRoy
 logger = logging.getLogger(__name__)
 
 class RestClient:
-    """Client untuk HTTP API"""
-    
     def __init__(self, api_key: str):
         self.api_key = api_key
         self._session: Optional[aiohttp.ClientSession] = None
@@ -27,121 +25,110 @@ class RestClient:
     
     @property
     def version(self) -> str:
-        return self._version or "unknown"
+        return self._version or "1.15.0"  # Default version
     
     async def get_version(self) -> str:
         """Dapatkan versi API terbaru"""
-        # PERBAIKI: /version bukan /api/version
         async with self._get("/version") as resp:
             data = await resp.json()
             self._version = data.get("version") or data.get("data", {}).get("version")
             return self._version
     
     async def get_account(self) -> Dict[str, Any]:
-        """Dapatkan data akun"""
         return await self._request("GET", "/accounts/me")
     
     async def get_dashboard_games(self, limit: int = 10, cursor: Optional[str] = None) -> Dict:
-        """Dapatkan history game"""
         params = {"limit": limit}
         if cursor:
             params["cursor"] = cursor
         return await self._request("GET", "/accounts/me/dashboard/games", params=params)
     
     async def redeem_code(self, code: str) -> Dict:
-        """Redeem kode (misal: WELCOME)"""
-        # PERBAIKI: /redeem bukan /api/redeem
         return await self._request("POST", "/redeem", json={"code": code})
     
-    # ===== LOADOUT ENDPOINTS =====
+    # ===== LOADOUT =====
     
     async def get_loadout(self) -> Dict[str, Any]:
-        """Dapatkan loadout saat ini"""
-        # PERBAIKI: /loadout bukan /accounts/me/loadout
-        return await self._request("GET", "/loadout")
+        return await self._request("GET", "/accounts/me/loadout")
     
     async def equip_main_pack(self, pack_id: str) -> Dict:
-        """Equip main pack"""
-        return await self._request("POST", "/loadout/main", json={"packId": pack_id})
+        return await self._request("POST", "/accounts/me/loadout/main", json={"packId": pack_id})
     
     async def equip_sub_pack(self, pack_id: str) -> Dict:
-        """Equip sub pack"""
-        return await self._request("POST", "/loadout/sub", json={"packId": pack_id})
+        return await self._request("POST", "/accounts/me/loadout/sub", json={"packId": pack_id})
     
     async def equip_relic(self, relic_id: str) -> Dict:
-        """Equip relic"""
-        return await self._request("POST", "/loadout/relics", json={"relicId": relic_id})
+        return await self._request("POST", "/accounts/me/loadout/relics", json={"relicId": relic_id})
     
     async def unequip_relic(self, relic_id: str) -> Dict:
-        """Unequip relic"""
-        return await self._request("DELETE", f"/loadout/relics/{relic_id}")
+        return await self._request("DELETE", f"/accounts/me/loadout/relics/{relic_id}")
     
     async def get_inventory(self) -> Dict[str, Any]:
-        """Dapatkan inventory"""
-        return await self._request("GET", "/inventory")
+        return await self._request("GET", "/accounts/me/inventory")
     
-    # ===== REWARD ENDPOINTS =====
+    # ===== REWARD =====
     
     async def get_dashboard_overview(self) -> Dict[str, Any]:
-        """Dapatkan overview dashboard"""
-        return await self._request("GET", "/dashboard/overview")
+        return await self._request("GET", "/accounts/me/dashboard/overview")
     
     async def claim_quest(self, quest_key: str, tier: int) -> Dict:
-        """Claim quest reward"""
-        return await self._request("POST", f"/quests/{quest_key}/claim/{tier}")
+        return await self._request("POST", f"/api/quests/{quest_key}/claim/{tier}")
     
     async def claim_daily(self) -> Dict:
-        """Claim daily reward"""
-        return await self._request("POST", "/daily-quests/claim")
+        return await self._request("POST", "/api/daily-quests/claim")
     
-    # ===== MARKETPLACE ENDPOINTS =====
+    # ===== MARKETPLACE =====
     
     async def get_marketplace_listings(self, filters: Dict = None) -> Dict[str, Any]:
-        """Dapatkan marketplace listings"""
         params = filters or {}
-        return await self._request("GET", "/marketplace/listings", params=params)
+        return await self._request("GET", "/api/marketplace/listings", params=params)
     
     async def buy_marketplace_listing(self, listing_id: str) -> Dict:
-        """Beli item dari marketplace"""
-        return await self._request("POST", f"/marketplace/listings/{listing_id}/buy")
+        return await self._request("POST", f"/api/marketplace/listings/{listing_id}/buy")
     
     async def _request(self, method: str, path: str, **kwargs) -> Dict:
-        """Internal method untuk melakukan request HTTP"""
         if not self._session:
-            raise RuntimeError("Session not initialized. Use 'async with' context manager.")
+            raise RuntimeError("Session not initialized.")
         
-        # PERBAIKI: path langsung, karena BASE_API sudah include /api
         url = f"{BASE_API}{path}"
         headers = {
             "Authorization": f"mr-auth {self.api_key}",
-            "X-Version": self._version or "latest"
+            "X-Version": self._version or "1.15.0"  # <-- Kirim version
         }
         
         if "headers" in kwargs:
             headers.update(kwargs.pop("headers"))
         
-        async with self._session.request(method, url, headers=headers, **kwargs) as resp:
-            if resp.status == 426:
-                raise VersionMismatchError(f"Version mismatch: {await resp.text()}")
-            if resp.status == 401:
-                raise AuthenticationError("Invalid API key")
-            
-            resp.raise_for_status()
-            data = await resp.json()
-            
-            if not data.get("success", True):
-                error = data.get("error", {})
-                raise ClawRoyaleError(f"API Error: {error.get('code')} - {error.get('message')}")
-            
-            return data.get("data", {})
+        try:
+            async with self._session.request(method, url, headers=headers, **kwargs) as resp:
+                if resp.status == 426:
+                    error_data = await resp.text()
+                    logger.error(f"Version mismatch: {error_data}")
+                    raise VersionMismatchError(f"Version mismatch: {error_data}")
+                if resp.status == 401:
+                    raise AuthenticationError("Invalid API key")
+                if resp.status == 404:
+                    logger.debug(f"Endpoint not found: {path}")
+                    return {}
+                
+                resp.raise_for_status()
+                data = await resp.json()
+                
+                if not data.get("success", True):
+                    error = data.get("error", {})
+                    raise ClawRoyaleError(f"API Error: {error.get('code')} - {error.get('message')}")
+                
+                return data.get("data", {})
+        except aiohttp.ClientError as e:
+            logger.warning(f"Request failed: {e}")
+            return {}
     
     def _get(self, path: str, **kwargs):
-        """Helper untuk GET request"""
         return self._session.get(f"{BASE_API}{path}", headers=self._default_headers, **kwargs)
     
     @property
     def _default_headers(self) -> Dict:
         return {
             "Authorization": f"mr-auth {self.api_key}",
-            "X-Version": self._version or "latest"
+            "X-Version": self._version or "1.15.0"
         }
