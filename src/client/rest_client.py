@@ -1,12 +1,9 @@
 # src/client/rest_client.py
-"""REST API client untuk Claw Royale"""
-
 import aiohttp
 import json
 import logging
 from typing import Optional, Dict, Any
 
-# src/client/rest_client.py
 from ..core.constants import BASE_API
 from ..core.exceptions import AuthenticationError, VersionMismatchError, ClawRoyaleError
 
@@ -34,7 +31,8 @@ class RestClient:
     
     async def get_version(self) -> str:
         """Dapatkan versi API terbaru"""
-        async with self._get("/api/version") as resp:
+        # PERBAIKI: /version bukan /api/version
+        async with self._get("/version") as resp:
             data = await resp.json()
             self._version = data.get("version") or data.get("data", {}).get("version")
             return self._version
@@ -52,64 +50,67 @@ class RestClient:
     
     async def redeem_code(self, code: str) -> Dict:
         """Redeem kode (misal: WELCOME)"""
-        return await self._request("POST", "/api/redeem", json={"code": code})
+        # PERBAIKI: /redeem bukan /api/redeem
+        return await self._request("POST", "/redeem", json={"code": code})
     
     # ===== LOADOUT ENDPOINTS =====
     
     async def get_loadout(self) -> Dict[str, Any]:
         """Dapatkan loadout saat ini"""
-        return await self._request("GET", "/accounts/me/loadout")
+        # PERBAIKI: /loadout bukan /accounts/me/loadout
+        return await self._request("GET", "/loadout")
     
     async def equip_main_pack(self, pack_id: str) -> Dict:
         """Equip main pack"""
-        return await self._request("POST", "/accounts/me/loadout/main", json={"packId": pack_id})
+        return await self._request("POST", "/loadout/main", json={"packId": pack_id})
     
     async def equip_sub_pack(self, pack_id: str) -> Dict:
         """Equip sub pack"""
-        return await self._request("POST", "/accounts/me/loadout/sub", json={"packId": pack_id})
+        return await self._request("POST", "/loadout/sub", json={"packId": pack_id})
     
     async def equip_relic(self, relic_id: str) -> Dict:
         """Equip relic"""
-        return await self._request("POST", "/accounts/me/loadout/relics", json={"relicId": relic_id})
+        return await self._request("POST", "/loadout/relics", json={"relicId": relic_id})
     
     async def unequip_relic(self, relic_id: str) -> Dict:
         """Unequip relic"""
-        return await self._request("DELETE", f"/accounts/me/loadout/relics/{relic_id}")
+        return await self._request("DELETE", f"/loadout/relics/{relic_id}")
     
     async def get_inventory(self) -> Dict[str, Any]:
         """Dapatkan inventory"""
-        return await self._request("GET", "/accounts/me/inventory")
+        return await self._request("GET", "/inventory")
     
     # ===== REWARD ENDPOINTS =====
     
     async def get_dashboard_overview(self) -> Dict[str, Any]:
         """Dapatkan overview dashboard"""
-        return await self._request("GET", "/accounts/me/dashboard/overview")
+        return await self._request("GET", "/dashboard/overview")
     
     async def claim_quest(self, quest_key: str, tier: int) -> Dict:
         """Claim quest reward"""
-        return await self._request("POST", f"/api/quests/{quest_key}/claim/{tier}")
+        return await self._request("POST", f"/quests/{quest_key}/claim/{tier}")
     
     async def claim_daily(self) -> Dict:
         """Claim daily reward"""
-        return await self._request("POST", "/api/daily-quests/claim")
+        return await self._request("POST", "/daily-quests/claim")
     
     # ===== MARKETPLACE ENDPOINTS =====
     
     async def get_marketplace_listings(self, filters: Dict = None) -> Dict[str, Any]:
         """Dapatkan marketplace listings"""
         params = filters or {}
-        return await self._request("GET", "/api/marketplace/listings", params=params)
+        return await self._request("GET", "/marketplace/listings", params=params)
     
     async def buy_marketplace_listing(self, listing_id: str) -> Dict:
         """Beli item dari marketplace"""
-        return await self._request("POST", f"/api/marketplace/listings/{listing_id}/buy")
+        return await self._request("POST", f"/marketplace/listings/{listing_id}/buy")
     
     async def _request(self, method: str, path: str, **kwargs) -> Dict:
         """Internal method untuk melakukan request HTTP"""
         if not self._session:
             raise RuntimeError("Session not initialized. Use 'async with' context manager.")
         
+        # PERBAIKI: path langsung, karena BASE_API sudah include /api
         url = f"{BASE_API}{path}"
         headers = {
             "Authorization": f"mr-auth {self.api_key}",
