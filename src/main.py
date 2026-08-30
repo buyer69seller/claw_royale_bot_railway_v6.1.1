@@ -1,5 +1,5 @@
 # src/main.py
-"""Entry point bot Claw Royale dengan AI Auto-Pilot"""
+"""Entry point bot Claw Royale dengan Hybrid AI"""
 
 import asyncio
 import logging
@@ -19,6 +19,7 @@ from .services.loadout_service import LoadoutService
 from .utils.health import HealthServer
 from .ai.knowledge import KnowledgeBase
 from .core.constants import ensure_directories
+from .services.auth_service import AuthService
 
 # Global untuk cleanup
 health_server = None
@@ -29,43 +30,46 @@ knowledge = None
 async def shutdown(signal, loop):
     """Graceful shutdown"""
     logger = logging.getLogger(__name__)
-    logger.info(f"Received signal {signal}, shutting down...")
+    logger.info(f"🛑 Received signal {signal}, shutting down...")
 
     # Save knowledge
     if knowledge:
         knowledge.save()
-        logger.info("Knowledge saved")
+        logger.info("💾 Knowledge saved")
 
     # Stop health server
     if health_server:
         await health_server.stop()
+        logger.info("🛑 Health server stopped")
 
     # Cancel driver task
     if driver_task:
         driver_task.cancel()
+        logger.info("🛑 Driver task cancelled")
         try:
             await driver_task
         except asyncio.CancelledError:
             pass
 
     loop.stop()
+    logger.info("✅ Shutdown complete")
 
-
-# src/main.py - update main function
-
-from .services.auth_service import AuthService
-
-# src/main.py - tambahkan di bagian main
 
 async def main():
+    """Main entry point"""
     global health_server, driver_task, knowledge
 
+    # Ensure directories exist
     ensure_directories()
+    logger.info("📁 Directories ensured")
+
+    # Setup logging
     setup_logging()
     logger = logging.getLogger(__name__)
 
+    # Cek API key
     if not API_KEY:
-        logger.error("❌ CLAW_API_KEY not set!")
+        logger.error("❌ CLAW_API_KEY not set! Please set in .env or environment")
         sys.exit(1)
 
     logger.info("🦀 Starting Claw Royale Bot v6.1 - Hybrid AI")
@@ -90,6 +94,7 @@ async def main():
     # Start bot
     async with RestClient(API_KEY) as rest:
         # === LOGIN ===
+        logger.info("🔐 Starting authentication flow...")
         auth_service = AuthService(rest)
         
         try:
@@ -106,6 +111,7 @@ async def main():
 
         # Auto-claim rewards
         try:
+            logger.info("🎁 Checking rewards...")
             reward_service = RewardService(rest)
             await reward_service.redeem_welcome_bundle()
         except Exception as e:
@@ -113,45 +119,57 @@ async def main():
 
         # Loadout optimization
         try:
+            logger.info("🔧 Checking loadout...")
             loadout_service = LoadoutService(rest)
             if not await loadout_service.is_full_set():
                 logger.info("🔧 Loadout not full, optimizing...")
                 await loadout_service.optimize_loadout()
+            else:
+                logger.info("✅ Loadout already full")
         except Exception as e:
             logger.debug(f"Loadout optimization skipped: {e}")
 
-# src/main.py - setelah driver dibuat
-
+        # ===== DRIVER SETUP =====
         logger.info("=" * 60)
         logger.info("🚀 Starting Hybrid AI Auto-Pilot...")
         logger.info("🧠 AI Engine: AI Auto-Pilot + Competitive v7")
         logger.info("🎮 Ready to join games...")
         logger.info("=" * 60)
         
-        logger.info("🔧 Creating driver instance...")  # <-- TAMBAHKAN
+        logger.info("🔧 Creating driver instance...")
         driver = Driver(rest)
         driver.knowledge = knowledge
         driver.auth_service = auth_service
-        logger.info("✅ Driver created")  # <-- TAMBAHKAN
+        logger.info("✅ Driver instance created")
         
         if health_server:
             health_server.set_driver(driver)
-            logger.info("✅ Health server connected to driver")  # <-- TAMBAHKAN
+            logger.info("✅ Health server connected to driver")
         
-        logger.info("🚀 Starting driver task...")  # <-- TAMBAHKAN
+        logger.info("🚀 Starting driver task...")
         driver_task = asyncio.create_task(driver.run())
-        logger.info("✅ Driver task created, waiting...")  # <-- TAMBAHKAN
+        logger.info("✅ Driver task created and scheduled")
+        logger.info("⏳ Waiting for driver to complete...")
         
         try:
             await driver_task
+            logger.info("✅ Driver task completed normally")
         except asyncio.CancelledError:
-            logger.info("Driver task cancelled")
+            logger.info("🛑 Driver task was cancelled")
         except Exception as e:
-            logger.error(f"💥 Driver crashed: {e}")
+            logger.error(f"💥 Driver crashed with error: {e}")
             import traceback
+            logger.error("📋 Full traceback:")
             logger.error(traceback.format_exc())
+            raise
+
 
 if __name__ == "__main__":
+    print("=" * 60)
+    print("🦀 Claw Royale Bot v6.1 - Hybrid AI")
+    print("🧠 AI Engine: AI Auto-Pilot + Competitive v7")
+    print("=" * 60)
+    
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -165,9 +183,15 @@ if __name__ == "__main__":
     try:
         loop.run_until_complete(main())
     except KeyboardInterrupt:
-        logging.info("Bot stopped by user")
+        logging.info("🛑 Bot stopped by user (KeyboardInterrupt)")
+    except Exception as e:
+        logging.error(f"💥 Fatal error: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
     finally:
         if knowledge:
             knowledge.save()
+            logging.info("💾 Final knowledge saved")
         loop.close()
+        logging.info("✅ Loop closed, exiting")
         sys.exit(0)
