@@ -140,7 +140,10 @@ async def main():
             await driver_task
         except asyncio.CancelledError:
             logger.info("Driver task cancelled")
-
+        except Exception as e:
+            logger.error(f"💥 Driver crashed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
