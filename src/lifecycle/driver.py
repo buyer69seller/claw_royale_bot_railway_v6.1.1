@@ -61,6 +61,8 @@ class Driver:
         self.total_actions = 0
         self.successful_actions = 0
 
+# src/lifecycle/driver.py - tambahkan di run() method
+
     async def run(self):
         """Loop utama driver"""
         self.delay = MIN_RETRY_DELAY
@@ -68,6 +70,8 @@ class Driver:
 
         while True:
             try:
+                logger.info("🔄 Driver loop iteration...")  # <-- TAMBAH DEBUG
+                
                 # Update version
                 await self.version_mgr.ensure_current(self.rest._session)
 
@@ -77,8 +81,10 @@ class Driver:
 
                 # Execute based on state
                 if state_info["action"] in ["start_free", "start_paid"]:
+                    logger.info(f"🎮 Attempting to join game: {state_info['action']}")  # <-- TAMBAH DEBUG
                     await self._start_game(state_info["entry_type"])
                 elif state_info["action"] in ["resume_free", "resume_paid"]:
+                    logger.info(f"🔄 Attempting to resume game: {state_info['action']}")  # <-- TAMBAH DEBUG
                     await self._resume_game(state_info["entry_type"])
                 elif state_info["action"] == "idle":
                     logger.info("⏳ Idle, waiting for game...")
@@ -112,16 +118,6 @@ class Driver:
                     })
                 self.current_game = None
                 self.strategy.reset_rejection_counter()
-                # Reset hybrid AI stats
-                self.ai.stats = {
-                    "decisions_made": 0,
-                    "ai_decisions": 0,
-                    "heuristic_decisions": 0,
-                    "survival_priority": 0,
-                    "kill_priority": 0,
-                    "loot_priority": 0,
-                    "explore_priority": 0
-                }
                 await asyncio.sleep(1)
                 self.delay = MIN_RETRY_DELAY
 
