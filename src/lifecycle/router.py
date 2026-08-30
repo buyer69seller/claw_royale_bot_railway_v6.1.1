@@ -20,46 +20,50 @@ class StateRouter:
         self.current_state = GameState.IDLE
         self.live_games: Dict[str, Dict] = {}
     
+# src/lifecycle/router.py - tambahkan debug
+
     async def determine_state(self) -> GameState:
         try:
+            logger.info("🔍 Determining game state...")  # <-- TAMBAH DEBUG
+            
             account = await self.rest.get_account()
+            logger.info(f"📡 Account data received: {account.get('id')}")  # <-- TAMBAH DEBUG
             
             readiness = account.get("readiness", {})
             current_games = account.get("currentGames", [])
             
-            # Log readiness issues
-            if not readiness.get("agentToken"):
-                logger.info("ℹ️ No agent token - will try to join via WebSocket")
-            if not readiness.get("sMoltzSufficient"):
-                logger.info("ℹ️ Insufficient sMoltz - will try free games")
+            logger.info(f"📊 Current games: {len(current_games)}")  # <-- TAMBAH DEBUG
+            logger.info(f"🔓 Free ready: {readiness.get('free', {}).get('ready', False)}")  # <-- TAMBAH DEBUG
             
             self.live_games = {}
             for game in current_games:
                 entry_type = game.get("entryType")
                 if entry_type and game.get("isAlive") and game.get("gameStatus") != "finished":
                     self.live_games[entry_type] = game
+                    logger.info(f"🎮 Live game found: {entry_type}")  # <-- TAMBAH DEBUG
             
-            # Cek game live
             if "free" in self.live_games:
                 logger.info("✅ Free game live, resuming...")
                 return GameState.IN_GAME_FREE
+            
             if "paid" in self.live_games:
                 logger.info("✅ Paid game live, resuming...")
                 return GameState.IN_GAME_PAID
             
-            # Cek readiness
             free_ready = readiness.get("free", {}).get("ready", False)
             paid_ready = readiness.get("paid", {}).get("ready", False)
             
-            # Jika tidak ready, tetap coba join via WebSocket
+            logger.info(f"🔓 Free ready: {free_ready}, Paid ready: {paid_ready}")  # <-- TAMBAH DEBUG
+            
+            # Coba join langsung via WebSocket jika tidak ready
             if not free_ready and not paid_ready:
                 logger.info("🔄 No readiness - attempting direct WebSocket join...")
-                # Coba join free game via WebSocket
-                return GameState.READY_FREE
+                return GameState.READY_FREE  # <-- FORCE JOIN
             
             if free_ready:
                 logger.info("✅ Free game ready, starting...")
                 return GameState.READY_FREE
+            
             if paid_ready:
                 logger.info("✅ Paid game ready, starting...")
                 return GameState.READY_PAID
@@ -69,6 +73,8 @@ class StateRouter:
             
         except Exception as e:
             logger.error(f"❌ Failed to determine state: {e}")
+            import traceback
+            logger.error(traceback.format_exc())  # <-- TAMBAH DEBUG
             return GameState.ERROR
     
     async def resolve_state(self) -> Dict[str, Any]:
