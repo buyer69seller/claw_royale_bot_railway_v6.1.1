@@ -120,22 +120,28 @@ async def main():
         except Exception as e:
             logger.debug(f"Loadout optimization skipped: {e}")
 
+# src/main.py - setelah driver dibuat
+
         logger.info("=" * 60)
         logger.info("🚀 Starting Hybrid AI Auto-Pilot...")
         logger.info("🧠 AI Engine: AI Auto-Pilot + Competitive v7")
         logger.info("🎮 Ready to join games...")
         logger.info("=" * 60)
-
-        # Run driver with Hybrid AI
+        
+        logger.info("🔧 Creating driver instance...")  # <-- TAMBAHKAN
         driver = Driver(rest)
         driver.knowledge = knowledge
         driver.auth_service = auth_service
-        driver_task = asyncio.create_task(driver.run())
-
-        # Connect driver ke health server untuk metrics
+        logger.info("✅ Driver created")  # <-- TAMBAHKAN
+        
         if health_server:
             health_server.set_driver(driver)
-
+            logger.info("✅ Health server connected to driver")  # <-- TAMBAHKAN
+        
+        logger.info("🚀 Starting driver task...")  # <-- TAMBAHKAN
+        driver_task = asyncio.create_task(driver.run())
+        logger.info("✅ Driver task created, waiting...")  # <-- TAMBAHKAN
+        
         try:
             await driver_task
         except asyncio.CancelledError:
