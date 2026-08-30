@@ -132,6 +132,10 @@ async def main():
         driver.auth_service = auth_service
         driver_task = asyncio.create_task(driver.run())
 
+        # Connect driver ke health server untuk metrics
+        if health_server:
+            health_server.set_driver(driver)
+
         try:
             await driver_task
         except asyncio.CancelledError:
