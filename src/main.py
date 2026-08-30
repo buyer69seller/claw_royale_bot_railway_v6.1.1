@@ -51,20 +51,19 @@ async def shutdown(signal, loop):
     loop.stop()
 
 
+# src/main.py - update main function
+
+from .services.auth_service import AuthService
+
 async def main():
-    """Main entry point"""
     global health_server, driver_task, knowledge
 
-    # Ensure directories exist
     ensure_directories()
-
-    # Setup logging
     setup_logging()
     logger = logging.getLogger(__name__)
 
-    # Cek API key
     if not API_KEY:
-        logger.error("❌ CLAW_API_KEY not set! Please set in .env or environment")
+        logger.error("❌ CLAW_API_KEY not set!")
         sys.exit(1)
 
     logger.info("🦀 Starting Claw Royale Bot v6.1 - AI Auto-Pilot")
@@ -88,43 +87,47 @@ async def main():
 
     # Start bot
     async with RestClient(API_KEY) as rest:
-        # Auto-claim rewards at startup (skip if fails)
+        # === LOGIN ===
+        auth_service = AuthService(rest)
+        
+        try:
+            # Login ke akun
+            account = await auth_service.login()
+            logger.info("=" * 60)
+            logger.info("✅ LOGIN SUCCESSFUL")
+            logger.info(f"   Account: {account.get('name')}")
+            logger.info(f"   ID: {account.get('id')}")
+            logger.info(f"   Wallet: {account.get('walletAddress')}")
+            logger.info("=" * 60)
+        except Exception as e:
+            logger.error(f"❌ Login failed: {e}")
+            sys.exit(1)
+
+        # Auto-claim rewards
         try:
             reward_service = RewardService(rest)
-
-            # Welcome bundle
             await reward_service.redeem_welcome_bundle()
-
-            # Check available rewards
-            available = await reward_service.get_available_rewards()
-            if available.get("daily") or available.get("quests"):
-                logger.info(f"📦 Rewards available")
-                result = await reward_service.check_and_claim_rewards()
-                if result["claimed"]:
-                    logger.info(f"🎉 Claimed: {result['claimed']}")
         except Exception as e:
             logger.debug(f"Reward check skipped: {e}")
 
-        # Optimize loadout (skip if fails)
+        # Loadout optimization
         try:
             loadout_service = LoadoutService(rest)
             if not await loadout_service.is_full_set():
                 logger.info("🔧 Loadout not full, optimizing...")
-                result = await loadout_service.optimize_loadout()
-                if result.get("changes"):
-                    logger.info(f"✅ Loadout optimized: {result['changes']}")
-                else:
-                    logger.info("✅ Loadout already optimal")
+                await loadout_service.optimize_loadout()
         except Exception as e:
             logger.debug(f"Loadout optimization skipped: {e}")
 
         logger.info("=" * 60)
         logger.info("🚀 Starting AI Auto-Pilot...")
+        logger.info("🎮 Ready to join games...")
         logger.info("=" * 60)
 
         # Run driver with AI
         driver = Driver(rest)
         driver.knowledge = knowledge
+        driver.auth_service = auth_service  # Pass auth service
         driver_task = asyncio.create_task(driver.run())
 
         try:
