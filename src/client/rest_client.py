@@ -9,6 +9,7 @@ from ..core.exceptions import AuthenticationError, VersionMismatchError, ClawRoy
 
 logger = logging.getLogger(__name__)
 
+
 class RestClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -33,8 +34,73 @@ class RestClient:
             data = await resp.json()
             self._version = data.get("version") or data.get("data", {}).get("version")
             return self._version
+    # src/client/rest_client.py - tambahkan method ini
+
+    # ===== AUTH / LOGIN =====
     
+    async def login(self) -> Dict[str, Any]:
+        """
+        Login ke akun Claw Royale
+        Berdasarkan skill.md: GET /accounts/me untuk verifikasi
+        """
+        logger.info("🔐 Logging in to Claw Royale...")
+        try:
+            account = await self.get_account()
+            if account:
+                logger.info(f"✅ Logged in as: {account.get('name')} ({account.get('id')})")
+                return account
+            else:
+                logger.error("❌ Login failed - no account data")
+                return {}
+        except Exception as e:
+            logger.error(f"❌ Login error: {e}")
+            return {}
+    
+    async def ensure_agent_token(self) -> bool:
+        """
+        Pastikan agent token ada (berdasarkan skill.md)
+        Agent token diperlukan untuk join game
+        """
+        try:
+            # Cek status
+            account = await self.get_account()
+            readiness = account.get("readiness", {})
+            
+            if readiness.get("agentToken"):
+                logger.info("✅ Agent token already exists")
+                return True
+            
+            # Register token
+            logger.info("🔑 Registering agent token...")
+            result = await self._request("POST", "/api/agent-token/register")
+            if result:
+                logger.info("✅ Agent token registered successfully!")
+                return True
+            else:
+                logger.warning("⚠️ Failed to register agent token")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Agent token error: {e}")
+            return False
+    
+    async def get_game_status(self) -> Dict[str, Any]:
+        """
+        Dapatkan status game berdasarkan skill.md
+        Cek currentGames dari /accounts/me
+        """
+        try:
+            account = await self.get_account()
+            return {
+                "current_games": account.get("currentGames", []),
+                "readiness": account.get("readiness", {}),
+                "is_in_game": len(account.get("currentGames", [])) > 0
+            }
+        except Exception as e:
+            logger.error(f"Failed to get game status: {e}")
+            return {"current_games": [], "is_in_game": False}
     # ===== ACCOUNT ENDPOINTS =====
+    
     
     async def get_account(self) -> Dict[str, Any]:
         """Dapatkan data akun"""
