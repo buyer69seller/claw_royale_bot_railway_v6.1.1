@@ -401,9 +401,12 @@ class Driver:
                 logger.exception(f"💥 Gameplay error: {e}")
                 raise
 
+# src/lifecycle/driver.py - di method _act
+
     async def _act(self, ws: WSClient, can_act: bool):
         """Ambil tindakan menggunakan Hybrid AI"""
         if not can_act or not self.current_game or not self.current_game.is_alive:
+            logger.info(f"⏳ Cannot act: can_act={can_act}, is_alive={self.current_game.is_alive if self.current_game else None}")
             return
 
         try:
@@ -426,6 +429,7 @@ class Driver:
 
                 if action:
                     thought = f"Hybrid AI: {decision.reasoning[0] if decision.reasoning else decision.action_type}"
+                    logger.info(f"📤 Sending action: {action}")  # <-- TAMBAHKAN
                     await ws.send_action(action, thought=thought)
 
                     if decision.action_type != "wait":
@@ -435,6 +439,8 @@ class Driver:
 
                     await asyncio.sleep(ACTION_INTERVAL_SECONDS)
                     return
+                else:
+                    logger.warning(f"⚠️ Failed to build action from decision: {decision}")
 
             # Fallback to heuristic strategy
             await self._act_heuristic(ws, can_act)
