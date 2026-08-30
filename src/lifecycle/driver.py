@@ -63,25 +63,25 @@ class Driver:
 
     async def run(self):
         """Loop utama driver"""
-        logger.info("🚀 Driver run() started!")  # <-- DEBUG
+        logger.info("🚀 Driver run() started!")
         self.delay = MIN_RETRY_DELAY
         self.start_time = __import__('time').time()
-        logger.info(f"⏰ Start time: {self.start_time}")  # <-- DEBUG
+        logger.info(f"⏰ Start time: {self.start_time}")
 
-        loop_count = 0  # <-- DEBUG
+        loop_count = 0
 
         while True:
             loop_count += 1
-            logger.info(f"🔄 Driver loop iteration #{loop_count}")  # <-- DEBUG
+            logger.info(f"🔄 Driver loop iteration #{loop_count}")
 
             try:
                 # Update version
-                logger.info("📥 Checking version...")  # <-- DEBUG
+                logger.info("📥 Checking version...")
                 await self.version_mgr.ensure_current(self.rest._session)
-                logger.info(f"✅ Version: {self.version_mgr.version}")  # <-- DEBUG
+                logger.info(f"✅ Version: {self.version_mgr.version}")
 
                 # Determine state
-                logger.info("🔍 Determining game state...")  # <-- DEBUG
+                logger.info("🔍 Determining game state...")
                 state_info = await self.router.resolve_state()
                 logger.info(f"📊 State: {state_info['state']} -> {state_info['action']}")
 
@@ -165,17 +165,14 @@ class Driver:
         logger.info(f"🔑 API Key: {self.rest.api_key[:10]}...")
 
         try:
-            # Pastikan auth_service ada
             if not self.auth_service:
                 from ..services.auth_service import AuthService
                 self.auth_service = AuthService(self.rest)
                 logger.info("✅ Auth service initialized")
 
-            # Dapatkan headers
             headers = await self.auth_service.get_websocket_auth()
             logger.info(f"📨 Headers: {headers}")
 
-            # Connect via WebSocket
             import websockets
             import json
             from ..core.constants import JOIN_WS
@@ -191,19 +188,16 @@ class Driver:
             )
             logger.info("✅ WebSocket connected!")
 
-            # Baca welcome frame
             welcome = json.loads(await connection.recv())
             decision = welcome.get("decision")
             logger.info(f"📨 Welcome decision: {decision}")
 
-            # Kirim hello
             hello = {"type": "hello", "entryType": entry_type}
             if entry_type == "paid":
                 hello["mode"] = "offchain"
             await connection.send(json.dumps(hello))
             logger.info(f"📤 Sent hello: {entry_type}")
 
-            # Tunggu response
             while True:
                 msg = json.loads(await connection.recv())
                 msg_type = msg.get("type")
@@ -215,11 +209,9 @@ class Driver:
                     self.game_count += 1
                     logger.info(f"✅ {msg_type} to game {self.current_game.game_id}")
 
-                    # Wrap connection in WSClient
                     ws = WSClient(self.rest.api_key, self.rest.version)
                     ws._ws = connection
 
-                    # Start gameplay with Hybrid AI
                     await self._play_game(ws)
                     return
 
@@ -270,17 +262,19 @@ class Driver:
             raise
 
     async def _play_game(self, ws: WSClient):
-        """Loop gameplay dengan Hybrid AI"""
+        """Loop gameplay dengan Hybrid AI - HANYA DETEKSI KEMATIAN DIRI SENDIRI"""
         logger.info("🎮 Starting Hybrid AI-powered gameplay loop...")
         logger.info("🧠 Hybrid AI = AI Auto-Pilot + Competitive v7")
+        logger.info("👻 Only detecting OWN death, ignoring other agents")
 
         while True:
             try:
                 msg = await ws.recv()
                 msg_type = msg.get("type")
 
-                # ===== KEMATIAN =====
+                # ===== HANYA DETEKSI KEMATIAN DIRI SENDIRI =====
                 if msg_type == "agent_died":
+                    # CEK: apakah ini kematian diri sendiri?
                     if msg.get("meta", {}).get("youDied") is True:
                         self.current_game.mark_dead()
                         if self.knowledge:
@@ -288,7 +282,12 @@ class Driver:
                                 "kills": self.current_game.kills,
                                 "survival_time": self.current_game.survival_time
                             })
+                        logger.info(f"💀 YOU DIED! Survival: {self.current_game.survival_time}, Kills: {self.current_game.kills}")
+                        logger.info("🔄 Restarting and joining new game...")
                         raise AgentDeadError("You died!")
+                    
+                    # Agent lain mati - IGNORE, lanjutkan
+                    # Jangan log setiap kali, hanya jika perlu
                     continue
 
                 # ===== GAME SELESAI =====
@@ -328,8 +327,26 @@ class Driver:
 
                     if view:
                         self.current_game.update_view(view, reason)
+                        
+                        # CEK KEMATIAN DARI VIEW (backup)
                         if not self.current_game.is_alive:
+                            logger.info(f"💀 Agent is dead (from view), restarting...")
+                            if self.knowledge:
+                                self.knowledge.record_outcome("death", {
+                                    "kills": self.current_game.kills,
+                                    "survival_time": self.current_game.survival_time
+                                })
                             raise AgentDeadError("Agent dead (from view)")
+                        
+                        # CEK HP = 0
+                        if self.current_game.hp <= 0:
+                            logger.info(f"💀 Agent HP is 0, restarting...")
+                            if self.knowledge:
+                                self.knowledge.record_outcome("death", {
+                                    "kills": self.current_game.kills,
+                                    "survival_time": self.current_game.survival_time
+                                })
+                            raise AgentDeadError("Agent HP is 0")
 
                         can_act = msg.get("canAct", self.current_game.can_act)
                         await self._act(ws, can_act)
@@ -340,6 +357,15 @@ class Driver:
                     view = msg.get("view", {})
                     if view:
                         self.current_game.update_view(view, "action_sync")
+                        # CEK KEMATIAN DARI VIEW
+                        if not self.current_game.is_alive:
+                            logger.info(f"💀 Agent is dead (from action_sync), restarting...")
+                            if self.knowledge:
+                                self.knowledge.record_outcome("death", {
+                                    "kills": self.current_game.kills,
+                                    "survival_time": self.current_game.survival_time
+                                })
+                            raise AgentDeadError("Agent dead (from action_sync)")
                     self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
                     continue
 
@@ -348,36 +374,44 @@ class Driver:
                     view = msg.get("view", {})
                     if view:
                         self.current_game.update_view(view, "action_rejected")
+                        # CEK KEMATIAN DARI VIEW
+                        if not self.current_game.is_alive:
+                            logger.info(f"💀 Agent is dead (from action_rejected), restarting...")
+                            if self.knowledge:
+                                self.knowledge.record_outcome("death", {
+                                    "kills": self.current_game.kills,
+                                    "survival_time": self.current_game.survival_time
+                                })
+                            raise AgentDeadError("Agent dead (from action_rejected)")
                     self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
                     if view and self.current_game.is_alive:
                         await self._act(ws, self.current_game.can_act)
                     continue
 
                 # ===== ACTION_RESULT =====
-    if msg_type == "action_result":
-        self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
-        error = msg.get("error")
-        action = msg.get("action")
+                if msg_type == "action_result":
+                    self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
+                    error = msg.get("error")
+                    action = msg.get("action")
 
-        # Track item jika action adalah pickup
-        if action and action.get("type") == "pickup":
-            item_id = action.get("itemInstanceId")
-            if error:
-                # Action gagal, mark item sebagai attempted dan collected (anggap sudah tidak ada)
-                if item_id:
-                    self.current_game.mark_item_attempted(item_id)
-                    self.current_game.mark_item_collected(item_id)  # <-- TAMBAH: anggap sudah tidak ada
-                    logger.debug(f"❌ Pickup failed for {item_id[:8]}, marked as collected (removed from cache)")
-            else:
-                if item_id:
-                    self.current_game.mark_item_collected(item_id)
-                    logger.debug(f"✅ Pickup success for {item_id[:8]}, marked as collected")
+                    # Track item jika action adalah pickup
+                    if action and action.get("type") == "pickup":
+                        item_id = action.get("itemInstanceId")
+                        if error:
+                            if item_id:
+                                self.current_game.mark_item_attempted(item_id)
+                                logger.debug(f"❌ Pickup failed for {item_id[:8]}, marked as attempted")
+                        else:
+                            if item_id:
+                                self.current_game.mark_item_collected(item_id)
+                                logger.debug(f"✅ Pickup success for {item_id[:8]}, marked as collected")
 
                     if error:
                         code = error.get("code")
                         message = error.get("message", "")
 
                         if code == "AGENT_DEAD":
+                            logger.info(f"💀 Agent dead from action_result: {message}")
                             raise AgentDeadError(f"Agent dead: {message}")
 
                         if code == "TARGET_DEAD":
@@ -385,6 +419,8 @@ class Driver:
                             view = msg.get("view", {})
                             if view:
                                 self.current_game.update_view(view, "action_result")
+                                if not self.current_game.is_alive:
+                                    raise AgentDeadError("Agent dead from action_result view")
                                 await self._act(ws, self.current_game.can_act)
                             continue
 
@@ -393,6 +429,8 @@ class Driver:
                             view = msg.get("view", {})
                             if view:
                                 self.current_game.update_view(view, "action_result")
+                                if not self.current_game.is_alive:
+                                    raise AgentDeadError("Agent dead from action_result view")
                                 await self._act(ws, self.current_game.can_act)
                             continue
 
@@ -402,8 +440,9 @@ class Driver:
                         self.strategy.reset_rejection_counter()
                     continue
 
-                # Unknown message type
-                logger.debug(f"📨 Unknown message type: {msg_type}")
+                # Unknown message type - jangan log terlalu banyak
+                if msg_type not in ["log", "message_sent", "rest_completed"]:
+                    logger.debug(f"📨 Unknown message type: {msg_type}")
 
             except ResumeTargetDeadError:
                 raise
@@ -417,35 +456,31 @@ class Driver:
                 logger.exception(f"💥 Gameplay error: {e}")
                 raise
 
-# src/lifecycle/driver.py - di method _act
-
     async def _act(self, ws: WSClient, can_act: bool):
         """Ambil tindakan menggunakan Hybrid AI"""
         if not can_act or not self.current_game or not self.current_game.is_alive:
-            logger.info(f"⏳ Cannot act: can_act={can_act}, is_alive={self.current_game.is_alive if self.current_game else None}")
             return
 
         try:
             if self.ai_enabled:
-                # Hybrid AI Decision
                 decision = await self.ai.decide(self.current_game)
 
-                # Get strategy name
                 strategy_name = self.ai.ai.get_strategy_name() if hasattr(self.ai, 'ai') else "Hybrid"
 
-                logger.info(
-                    f"🧠 Hybrid AI [{strategy_name}]: {decision.action_type} "
-                    f"(Conf: {decision.confidence:.2f}, "
-                    f"Risk: {decision.risk_score:.2f}, "
-                    f"Value: {decision.expected_value:.2f})"
-                )
+                # Log hanya jika action bukan wait
+                if decision.action_type != "wait":
+                    logger.info(
+                        f"🧠 Hybrid AI [{strategy_name}]: {decision.action_type} "
+                        f"(Conf: {decision.confidence:.2f}, "
+                        f"Risk: {decision.risk_score:.2f}, "
+                        f"Value: {decision.expected_value:.2f})"
+                    )
 
-                # Build action from decision
                 action = self._build_action_from_decision(decision)
 
                 if action:
                     thought = f"Hybrid AI: {decision.reasoning[0] if decision.reasoning else decision.action_type}"
-                    logger.info(f"📤 Sending action: {action}")  # <-- TAMBAHKAN
+                    logger.info(f"📤 Sending action: {action}")
                     await ws.send_action(action, thought=thought)
 
                     if decision.action_type != "wait":
@@ -455,10 +490,7 @@ class Driver:
 
                     await asyncio.sleep(ACTION_INTERVAL_SECONDS)
                     return
-                else:
-                    logger.warning(f"⚠️ Failed to build action from decision: {decision}")
 
-            # Fallback to heuristic strategy
             await self._act_heuristic(ws, can_act)
 
         except Exception as e:
