@@ -229,14 +229,17 @@ class Driver:
             logger.info(f"{entry_type} resume target dead, re-dialing...")
             raise
 
-    async def _play_game(self, ws: WSClient):
-        """Loop gameplay dengan AI"""
-        logger.info("🎮 Starting AI-powered gameplay loop...")
+    # src/lifecycle/driver.py - update _play_game
 
-        while True:
-            try:
-                msg = await ws.recv()
-                msg_type = msg.get("type")
+async def _play_game(self, ws: WSClient):
+    """Loop gameplay dengan AI"""
+    logger.info("🎮 Starting AI-powered gameplay loop...")
+
+    while True:
+        try:
+            # Gunakan ws.recv() yang sudah tersedia
+            msg = await ws.recv()
+            msg_type = msg.get("type")
 
                 # Kematian
                 if msg_type == "agent_died":
