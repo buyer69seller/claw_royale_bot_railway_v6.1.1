@@ -1,10 +1,10 @@
 # src/lifecycle/driver.py
-"""Driver utama dengan AI Auto-Pilot"""
+"""Driver utama dengan Hybrid AI (AI Auto-Pilot + Competitive v7)"""
 
 import asyncio
 import logging
 import json
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from websockets.exceptions import ConnectionClosed
 
@@ -25,46 +25,57 @@ from ..core.constants import (
     MIN_RETRY_DELAY,
     MAX_RETRY_DELAY,
     RETRY_BACKOFF_MULTIPLIER,
-    JOIN_WS
+    JOIN_WS,
+    ACTION_INTERVAL_SECONDS
 )
-from ..core.config import ACTION_INTERVAL_SECONDS
-from ..ai.decision import DecisionEngine
+from ..ai.hybrid_engine import HybridAIEngine
 from ..ai.knowledge import KnowledgeBase
 
 logger = logging.getLogger(__name__)
 
 
 class Driver:
-    """Driver utama bot dengan AI"""
+    """Driver utama bot dengan Hybrid AI"""
 
     def __init__(self, rest_client: RestClient):
         self.rest = rest_client
         self.router = StateRouter(rest_client)
         self.version_mgr = VersionManager(rest_client.api_key)
 
-        # AI Components
-        self.ai = DecisionEngine()
+        # Hybrid AI Engine
+        self.ai = HybridAIEngine()
         self.knowledge: Optional[KnowledgeBase] = None
         self.auth_service = None
 
-        # Fallback strategy
+        # Fallback strategy (heuristic)
         self.strategy = StrategyEngine()
 
+        # Game state
         self.current_game: Optional[GameState] = None
         self.delay = MIN_RETRY_DELAY
         self.game_count = 0
         self.ai_enabled = True
 
+        # Performance tracking
+        self.start_time = None
+        self.total_actions = 0
+        self.successful_actions = 0
+
     async def run(self):
         """Loop utama driver"""
         self.delay = MIN_RETRY_DELAY
+        self.start_time = __import__('time').time()
 
         while True:
             try:
+                # Update version
                 await self.version_mgr.ensure_current(self.rest._session)
-                state_info = await self.router.resolve_state()
-                logger.info(f"State: {state_info['state']} -> {state_info['action']}")
 
+                # Determine state
+                state_info = await self.router.resolve_state()
+                logger.info(f"📊 State: {state_info['state']} -> {state_info['action']}")
+
+                # Execute based on state
                 if state_info["action"] in ["start_free", "start_paid"]:
                     await self._start_game(state_info["entry_type"])
                 elif state_info["action"] in ["resume_free", "resume_paid"]:
@@ -79,13 +90,13 @@ class Driver:
                 self.delay = MIN_RETRY_DELAY
 
             except ResumeTargetDeadError as e:
-                logger.warning(f"Resume target dead: {e}, re-dialing...")
+                logger.warning(f"🔄 Resume target dead: {e}, re-dialing...")
                 await asyncio.sleep(1)
                 self.delay = MIN_RETRY_DELAY
                 continue
 
             except ConnectionClosed as e:
-                logger.warning(f"WebSocket closed: {e.code} - {e.reason}")
+                logger.warning(f"🔌 WebSocket closed: {e.code} - {e.reason}")
                 if e.code in (1013, 4008, 4030, 4031):
                     await asyncio.sleep(3)
                 else:
@@ -101,6 +112,16 @@ class Driver:
                     })
                 self.current_game = None
                 self.strategy.reset_rejection_counter()
+                # Reset hybrid AI stats
+                self.ai.stats = {
+                    "decisions_made": 0,
+                    "ai_decisions": 0,
+                    "heuristic_decisions": 0,
+                    "survival_priority": 0,
+                    "kill_priority": 0,
+                    "loot_priority": 0,
+                    "explore_priority": 0
+                }
                 await asyncio.sleep(1)
                 self.delay = MIN_RETRY_DELAY
 
@@ -117,14 +138,15 @@ class Driver:
                 self.delay = MIN_RETRY_DELAY
 
             except Exception as e:
-                logger.exception(f"Driver error: {e}")
+                logger.exception(f"💥 Driver error: {e}")
                 await asyncio.sleep(self.delay)
                 self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
 
     async def _start_game(self, entry_type: str):
-        """Mulai game baru - via WebSocket"""
+        """Mulai game baru - via WebSocket dengan Hybrid AI"""
         logger.info(f"🎮 Joining {entry_type} game...")
         self.current_game = GameState(entry_type=entry_type)
+        self.game_count += 1
 
         try:
             import websockets
@@ -170,6 +192,7 @@ class Driver:
                     ws = WSClient(self.rest.api_key, self.rest.version)
                     ws._ws = connection
 
+                    # Start gameplay with Hybrid AI
                     await self._play_game(ws)
                     return
 
@@ -224,15 +247,16 @@ class Driver:
             raise
 
     async def _play_game(self, ws: WSClient):
-        """Loop gameplay dengan AI"""
-        logger.info("🎮 Starting AI-powered gameplay loop...")
+        """Loop gameplay dengan Hybrid AI"""
+        logger.info("🎮 Starting Hybrid AI-powered gameplay loop...")
+        logger.info("🧠 Hybrid AI = AI Auto-Pilot + Competitive v7")
 
         while True:
             try:
                 msg = await ws.recv()
                 msg_type = msg.get("type")
 
-                # Kematian
+                # ===== KEMATIAN =====
                 if msg_type == "agent_died":
                     if msg.get("meta", {}).get("youDied") is True:
                         self.current_game.mark_dead()
@@ -244,15 +268,18 @@ class Driver:
                         raise AgentDeadError("You died!")
                     continue
 
-                # Game selesai
+                # ===== GAME SELESAI =====
                 if msg_type == "game_settled":
                     self.current_game.mark_finished()
-                    logger.info("🏆 Game settled!")
+                    winners = msg.get("winners", [])
+                    logger.info(f"🏆 Game settled! Winners: {len(winners)}")
                     if self.knowledge:
                         self.knowledge.record_outcome("win", {
                             "kills": self.current_game.kills,
                             "survival_time": self.current_game.survival_time
                         })
+                    # Log Hybrid AI stats
+                    self._log_hybrid_stats()
                     break
 
                 if msg_type == "game_ended":
@@ -264,13 +291,16 @@ class Driver:
                             "kills": self.current_game.kills,
                             "survival_time": self.current_game.survival_time
                         })
+                    # Log Hybrid AI stats
+                    self._log_hybrid_stats()
                     break
 
+                # ===== CAN_ACT =====
                 if msg_type == "can_act_changed":
                     self.current_game.can_act = bool(msg.get("canAct"))
                     continue
 
-                # Agent view / turn advanced
+                # ===== AGENT_VIEW / TURN_ADVANCED =====
                 if msg_type in ("agent_view", "turn_advanced"):
                     view = msg.get("view", {})
                     reason = msg.get("reason", "sync")
@@ -284,7 +314,7 @@ class Driver:
                         await self._act(ws, can_act)
                     continue
 
-                # Action sync
+                # ===== ACTION_SYNC =====
                 if msg_type == "action_sync":
                     view = msg.get("view", {})
                     if view:
@@ -292,17 +322,18 @@ class Driver:
                     self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
                     continue
 
-                # Action rejected
+                # ===== ACTION_REJECTED =====
                 if msg_type == "action_rejected":
                     view = msg.get("view", {})
                     if view:
                         self.current_game.update_view(view, "action_rejected")
                     self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
                     if view and self.current_game.is_alive:
+                        # Recompute with Hybrid AI
                         await self._act(ws, self.current_game.can_act)
                     continue
 
-                # Action result
+                # ===== ACTION_RESULT =====
                 if msg_type == "action_result":
                     self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
                     error = msg.get("error")
@@ -315,7 +346,7 @@ class Driver:
                             raise AgentDeadError(f"Agent dead: {message}")
 
                         if code == "TARGET_DEAD":
-                            logger.info(f"TARGET_DEAD - recomputing (turn {self.current_game.turn})")
+                            logger.info(f"🎯 TARGET_DEAD - recomputing (turn {self.current_game.turn})")
                             view = msg.get("view", {})
                             if view:
                                 self.current_game.update_view(view, "action_result")
@@ -323,18 +354,22 @@ class Driver:
                             continue
 
                         if code == "ACTION_FAILED":
-                            logger.warning(f"Action failed: {message}")
+                            logger.warning(f"⚠️ Action failed: {message}")
                             view = msg.get("view", {})
                             if view:
                                 self.current_game.update_view(view, "action_result")
                                 await self._act(ws, self.current_game.can_act)
                             continue
 
+                    # Track successful action
                     if msg.get("action"):
+                        self.total_actions += 1
+                        self.successful_actions += 1
                         self.strategy.reset_rejection_counter()
                     continue
 
-                logger.debug(f"Unknown message type: {msg_type}")
+                # Unknown message
+                logger.debug(f"📨 Unknown message type: {msg_type}")
 
             except ResumeTargetDeadError:
                 raise
@@ -345,46 +380,52 @@ class Driver:
                     raise ResumeTargetDeadError(f"Resume target dead: {e.reason}")
                 raise
             except Exception as e:
-                logger.exception(f"Gameplay error: {e}")
+                logger.exception(f"💥 Gameplay error: {e}")
                 raise
 
     async def _act(self, ws: WSClient, can_act: bool):
-        """Ambil tindakan menggunakan AI atau fallback"""
+        """Ambil tindakan menggunakan Hybrid AI"""
         if not can_act or not self.current_game or not self.current_game.is_alive:
             return
 
         try:
             if self.ai_enabled:
+                # Hybrid AI Decision
                 decision = await self.ai.decide(self.current_game)
 
+                # Get strategy name
+                strategy_name = self.ai.ai.get_strategy_name() if hasattr(self.ai, 'ai') else "Hybrid"
+
                 logger.info(
-                    f"🤖 AI: {self.ai.get_strategy_name()} | "
-                    f"{decision.action_type} "
+                    f"🧠 Hybrid AI [{strategy_name}]: {decision.action_type} "
                     f"(Conf: {decision.confidence:.2f}, "
-                    f"Risk: {decision.risk_score:.2f})"
+                    f"Risk: {decision.risk_score:.2f}, "
+                    f"Value: {decision.expected_value:.2f})"
                 )
 
+                # Build action from decision
                 action = self._build_action_from_decision(decision)
 
                 if action:
-                    thought = f"AI: {decision.reasoning[0] if decision.reasoning else decision.action_type}"
+                    thought = f"Hybrid AI: {decision.reasoning[0] if decision.reasoning else decision.action_type}"
                     await ws.send_action(action, thought=thought)
 
                     if decision.action_type != "wait":
-                        self.knowledge.data["stats"]["successful_actions"] += 1
-                        self.knowledge.save()
+                        if self.knowledge:
+                            self.knowledge.data["stats"]["successful_actions"] += 1
+                            self.knowledge.save()
 
                     await asyncio.sleep(ACTION_INTERVAL_SECONDS)
                     return
 
-            # Fallback
+            # Fallback to heuristic strategy
             await self._act_heuristic(ws, can_act)
 
         except Exception as e:
-            logger.error(f"Action error: {e}")
+            logger.error(f"💥 Hybrid AI error: {e}")
             await self._act_heuristic(ws, can_act)
 
-    def _build_action_from_decision(self, decision) -> Optional[dict]:
+    def _build_action_from_decision(self, decision) -> Optional[Dict]:
         """Build action from AI decision"""
         action_type = decision.action_type
         target_id = decision.target_id
@@ -393,16 +434,22 @@ class Driver:
             target = self._find_target(target_id, "enemies")
             if target:
                 return ActionBuilder.attack(target)
+
         elif action_type == "pickup":
             item = self._find_target(target_id, "items")
             if item:
                 return ActionBuilder.pickup(item)
-        elif action_type in ("interact", "explore"):
+
+        elif action_type == "interact":
             obj = self._find_target(target_id, "interactables")
             if obj:
-                if action_type == "explore":
-                    return ActionBuilder.explore(obj)
                 return ActionBuilder.interact(obj)
+
+        elif action_type == "explore":
+            obj = self._find_target(target_id, "interactables")
+            if obj:
+                return ActionBuilder.explore(obj)
+
         elif action_type == "move":
             conn = self._find_target(target_id, "connections")
             if conn:
@@ -410,8 +457,8 @@ class Driver:
 
         return None
 
-    def _find_target(self, target_id: str, category: str) -> Optional[dict]:
-        """Cari target berdasarkan ID"""
+    def _find_target(self, target_id: str, category: str) -> Optional[Dict]:
+        """Cari target berdasarkan ID dan kategori"""
         if not self.current_game:
             return None
 
@@ -419,14 +466,20 @@ class Driver:
             for enemy in self.current_game.get_enemies():
                 if enemy.get("id") == target_id or enemy.get("agentId") == target_id:
                     return enemy
+                # Cek juga di metadata
+                if enemy.get("metadata", {}).get("id") == target_id:
+                    return enemy
+
         elif category == "items":
             for item in self.current_game.get_items():
                 if item.get("id") == target_id or item.get("instanceId") == target_id:
                     return item
+
         elif category == "interactables":
             for obj in self.current_game.get_interactables():
                 if obj.get("id") == target_id or obj.get("interactableId") == target_id:
                     return obj
+
         elif category == "connections":
             for conn in self.current_game.get_connections():
                 if conn.get("id") == target_id or conn.get("regionId") == target_id:
@@ -435,7 +488,7 @@ class Driver:
         return None
 
     async def _act_heuristic(self, ws: WSClient, can_act: bool):
-        """Fallback: heuristic strategy"""
+        """Fallback: heuristic strategy (v7)"""
         if not can_act or not self.current_game:
             return
 
@@ -443,5 +496,38 @@ class Driver:
         action = self.strategy.execute(self.current_game, decision)
 
         if action:
-            await ws.send_action(action, thought="Heuristic strategy")
+            thought = f"Heuristic (v7): {decision.get('kind', 'action')}"
+            await ws.send_action(action, thought=thought)
             await asyncio.sleep(ACTION_INTERVAL_SECONDS)
+
+    def _log_hybrid_stats(self):
+        """Log Hybrid AI statistics"""
+        stats = self.ai.get_stats() if hasattr(self.ai, 'get_stats') else {}
+
+        logger.info("=" * 60)
+        logger.info("📊 Hybrid AI Performance Summary")
+        logger.info("=" * 60)
+        logger.info(f"   Total Decisions: {stats.get('decisions_made', 0)}")
+        logger.info(f"   AI Decisions: {stats.get('ai_decisions', 0)}")
+        logger.info(f"   Heuristic Decisions: {stats.get('heuristic_decisions', 0)}")
+        logger.info(f"   Survival Priority: {stats.get('survival_priority', 0)}")
+        logger.info(f"   Kill Priority: {stats.get('kill_priority', 0)}")
+        logger.info(f"   Loot Priority: {stats.get('loot_priority', 0)}")
+        logger.info(f"   Explore Priority: {stats.get('explore_priority', 0)}")
+        logger.info(f"   Total Actions: {self.total_actions}")
+        logger.info(f"   Success Rate: {self.successful_actions / max(self.total_actions, 1) * 100:.1f}%")
+        logger.info("=" * 60)
+
+    def get_performance(self) -> Dict[str, Any]:
+        """Dapatkan performa bot"""
+        uptime = int(__import__('time').time() - (self.start_time or 0))
+
+        return {
+            "uptime": uptime,
+            "game_count": self.game_count,
+            "total_actions": self.total_actions,
+            "success_rate": self.successful_actions / max(self.total_actions, 1),
+            "hybrid_stats": self.ai.get_stats() if hasattr(self.ai, 'get_stats') else {},
+            "current_state": self.current_game.entry_type if self.current_game else "none",
+            "is_in_game": self.current_game is not None and self.current_game.is_alive
+        }
