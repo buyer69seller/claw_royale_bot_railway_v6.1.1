@@ -55,6 +55,8 @@ async def shutdown(signal, loop):
 
 from .services.auth_service import AuthService
 
+# src/main.py - tambahkan di bagian main
+
 async def main():
     global health_server, driver_task, knowledge
 
@@ -66,7 +68,7 @@ async def main():
         logger.error("❌ CLAW_API_KEY not set!")
         sys.exit(1)
 
-    logger.info("🦀 Starting Claw Royale Bot v6.1 - AI Auto-Pilot")
+    logger.info("🦀 Starting Claw Royale Bot v6.1 - Hybrid AI")
     logger.info("=" * 60)
 
     # Init Knowledge Base
@@ -91,7 +93,6 @@ async def main():
         auth_service = AuthService(rest)
         
         try:
-            # Login ke akun
             account = await auth_service.login()
             logger.info("=" * 60)
             logger.info("✅ LOGIN SUCCESSFUL")
@@ -120,14 +121,15 @@ async def main():
             logger.debug(f"Loadout optimization skipped: {e}")
 
         logger.info("=" * 60)
-        logger.info("🚀 Starting AI Auto-Pilot...")
+        logger.info("🚀 Starting Hybrid AI Auto-Pilot...")
+        logger.info("🧠 AI Engine: AI Auto-Pilot + Competitive v7")
         logger.info("🎮 Ready to join games...")
         logger.info("=" * 60)
 
-        # Run driver with AI
+        # Run driver with Hybrid AI
         driver = Driver(rest)
         driver.knowledge = knowledge
-        driver.auth_service = auth_service  # Pass auth service
+        driver.auth_service = auth_service
         driver_task = asyncio.create_task(driver.run())
 
         try:
