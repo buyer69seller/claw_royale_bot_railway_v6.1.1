@@ -1,6 +1,4 @@
 # src/lifecycle/router.py
-"""State router untuk menentukan tindakan berikutnya"""
-
 import logging
 from typing import Dict, Any
 from enum import Enum
@@ -25,8 +23,13 @@ class StateRouter:
     async def determine_state(self) -> GameState:
         try:
             account = await self.rest.get_account()
+            logger.info(f"📡 Account data: {account}")
+            
             readiness = account.get("readiness", {})
             current_games = account.get("currentGames", [])
+            
+            logger.info(f"📊 Readiness: {readiness}")
+            logger.info(f"🎮 Current games: {current_games}")
             
             self.live_games = {}
             for game in current_games:
@@ -35,18 +38,29 @@ class StateRouter:
                     self.live_games[entry_type] = game
             
             if "free" in self.live_games:
+                logger.info("✅ Free game live, resuming...")
                 return GameState.IN_GAME_FREE
             if "paid" in self.live_games:
+                logger.info("✅ Paid game live, resuming...")
                 return GameState.IN_GAME_PAID
-            if readiness.get("free", {}).get("ready", False):
+            
+            free_ready = readiness.get("free", {}).get("ready", False)
+            paid_ready = readiness.get("paid", {}).get("ready", False)
+            
+            logger.info(f"🔓 Free ready: {free_ready}, Paid ready: {paid_ready}")
+            
+            if free_ready:
+                logger.info("✅ Free game ready, starting...")
                 return GameState.READY_FREE
-            if readiness.get("paid", {}).get("ready", False):
+            if paid_ready:
+                logger.info("✅ Paid game ready, starting...")
                 return GameState.READY_PAID
             
+            logger.info("⏳ No game available, idle...")
             return GameState.IDLE
             
         except Exception as e:
-            logger.error(f"Failed to determine state: {e}")
+            logger.error(f"❌ Failed to determine state: {e}")
             return GameState.ERROR
     
     async def resolve_state(self) -> Dict[str, Any]:
