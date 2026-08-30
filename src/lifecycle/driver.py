@@ -353,57 +353,54 @@ class Driver:
                         await self._act(ws, self.current_game.can_act)
                     continue
 
-# src/lifecycle/driver.py - di _play_game, bagian action_result
+                # ===== ACTION_RESULT =====
+                if msg_type == "action_result":
+                    self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
+                    error = msg.get("error")
+                    action = msg.get("action")
 
-    # ===== ACTION_RESULT =====
-    if msg_type == "action_result":
-        self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
-        error = msg.get("error")
-        action = msg.get("action")  # <-- TAMBAHKAN INI
-        
-        # TAMBAHKAN: track item jika action adalah pickup
-        if action and action.get("type") == "pickup":
-            item_id = action.get("itemInstanceId")
-            if error:
-                # Action gagal, mark item sebagai attempted
-                if item_id:
-                    self.current_game.mark_item_attempted(item_id)
-                    logger.debug(f"❌ Pickup failed for {item_id[:8]}, marked as attempted")
-            else:
-                # Action berhasil, mark item sebagai collected
-                if item_id:
-                    self.current_game.mark_item_collected(item_id)
-                    logger.debug(f"✅ Pickup success for {item_id[:8]}, marked as collected")
+                    # Track item jika action adalah pickup
+                    if action and action.get("type") == "pickup":
+                        item_id = action.get("itemInstanceId")
+                        if error:
+                            if item_id:
+                                self.current_game.mark_item_attempted(item_id)
+                                logger.debug(f"❌ Pickup failed for {item_id[:8]}, marked as attempted")
+                        else:
+                            if item_id:
+                                self.current_game.mark_item_collected(item_id)
+                                logger.debug(f"✅ Pickup success for {item_id[:8]}, marked as collected")
 
-        if error:
-            code = error.get("code")
-            message = error.get("message", "")
-            
-            if code == "AGENT_DEAD":
-                raise AgentDeadError(f"Agent dead: {message}")
-            
-            if code == "TARGET_DEAD":
-                logger.info(f"🎯 TARGET_DEAD - recomputing (turn {self.current_game.turn})")
-                view = msg.get("view", {})
-                if view:
-                    self.current_game.update_view(view, "action_result")
-                    await self._act(ws, self.current_game.can_act)
-                continue
-            
-            if code == "ACTION_FAILED":
-                logger.warning(f"⚠️ Action failed: {message}")
-                view = msg.get("view", {})
-                if view:
-                    self.current_game.update_view(view, "action_result")
-                    await self._act(ws, self.current_game.can_act)
-                continue
+                    if error:
+                        code = error.get("code")
+                        message = error.get("message", "")
 
-        if msg.get("action"):
-            self.total_actions += 1
-            self.successful_actions += 1
-            self.strategy.reset_rejection_counter()
-        continue
+                        if code == "AGENT_DEAD":
+                            raise AgentDeadError(f"Agent dead: {message}")
 
+                        if code == "TARGET_DEAD":
+                            logger.info(f"🎯 TARGET_DEAD - recomputing (turn {self.current_game.turn})")
+                            view = msg.get("view", {})
+                            if view:
+                                self.current_game.update_view(view, "action_result")
+                                await self._act(ws, self.current_game.can_act)
+                            continue
+
+                        if code == "ACTION_FAILED":
+                            logger.warning(f"⚠️ Action failed: {message}")
+                            view = msg.get("view", {})
+                            if view:
+                                self.current_game.update_view(view, "action_result")
+                                await self._act(ws, self.current_game.can_act)
+                            continue
+
+                    if msg.get("action"):
+                        self.total_actions += 1
+                        self.successful_actions += 1
+                        self.strategy.reset_rejection_counter()
+                    continue
+
+                # Unknown message type
                 logger.debug(f"📨 Unknown message type: {msg_type}")
 
             except ResumeTargetDeadError:
