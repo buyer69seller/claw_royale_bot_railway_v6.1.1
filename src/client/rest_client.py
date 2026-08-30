@@ -166,6 +166,8 @@ class RestClient:
     
     # ===== INTERNAL =====
     
+# src/client/rest_client.py - update _request method
+
     async def _request(self, method: str, path: str, **kwargs) -> Dict:
         if not self._session:
             raise RuntimeError("Session not initialized.")
@@ -181,12 +183,19 @@ class RestClient:
         
         try:
             async with self._session.request(method, url, headers=headers, **kwargs) as resp:
+                # Handle 400 gracefully untuk redeem
+                if resp.status == 400 and "redeem" in path:
+                    logger.debug(f"Redeem request returned 400 (likely already used)")
+                    return {}
+                
                 if resp.status == 426:
                     error_data = await resp.text()
                     logger.error(f"Version mismatch: {error_data}")
                     raise VersionMismatchError(f"Version mismatch: {error_data}")
+                
                 if resp.status == 401:
                     raise AuthenticationError("Invalid API key")
+                
                 if resp.status == 404:
                     logger.debug(f"Endpoint not found: {path}")
                     return {}
@@ -203,11 +212,19 @@ class RestClient:
                 
                 if not data.get("success", True):
                     error = data.get("error", {})
+                    # Jangan log error untuk redeem yang sudah digunakan
+                    if "redeem" in path and error.get("code") in ["ALREADY_REDEEMED", "INVALID_CODE"]:
+                        logger.debug(f"Redeem info: {error.get('message')}")
+                        return {}
                     raise ClawRoyaleError(f"API Error: {error.get('code')} - {error.get('message')}")
                 
                 return data.get("data", {})
                 
         except aiohttp.ClientError as e:
+            # Handle 400 gracefully untuk redeem
+            if "400" in str(e) and "redeem" in path:
+                logger.debug(f"Redeem request failed (likely already used)")
+                return {}
             logger.warning(f"Request failed: {e}")
             return {}
         except json.JSONDecodeError as e:
