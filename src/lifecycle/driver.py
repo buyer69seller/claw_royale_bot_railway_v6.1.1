@@ -138,23 +138,31 @@ class Driver:
                 await asyncio.sleep(self.delay)
                 self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
 
+# src/lifecycle/driver.py - perbaiki _start_game
+
     async def _start_game(self, entry_type: str):
         """Mulai game baru - via WebSocket dengan Hybrid AI"""
         logger.info(f"🎮 Joining {entry_type} game...")
-        self.current_game = GameState(entry_type=entry_type)
-        self.game_count += 1
-
+        logger.info(f"🔑 API Key: {self.rest.api_key[:10]}...")  # <-- TAMBAH DEBUG
+        
         try:
-            import websockets
-
-            # Get auth headers
+            # Pastikan auth_service ada
             if not self.auth_service:
                 from ..services.auth_service import AuthService
                 self.auth_service = AuthService(self.rest)
-
+                logger.info("✅ Auth service initialized")  # <-- TAMBAH DEBUG
+            
+            # Dapatkan headers
             headers = await self.auth_service.get_websocket_auth()
-
+            logger.info(f"📨 Headers: {headers}")  # <-- TAMBAH DEBUG
+            
             # Connect via WebSocket
+            import websockets
+            import json
+            from ..core.constants import JOIN_WS
+            
+            logger.info(f"🔗 Connecting to {JOIN_WS}...")  # <-- TAMBAH DEBUG
+            
             connection = await websockets.connect(
                 JOIN_WS,
                 additional_headers=headers,
@@ -162,75 +170,74 @@ class Driver:
                 ping_timeout=20,
                 close_timeout=5
             )
-
+            logger.info("✅ WebSocket connected!")  # <-- TAMBAH DEBUG
+            
             # Baca welcome frame
             welcome = json.loads(await connection.recv())
             decision = welcome.get("decision")
             logger.info(f"📨 Welcome decision: {decision}")
-
+            
             # Kirim hello
             hello = {"type": "hello", "entryType": entry_type}
             if entry_type == "paid":
                 hello["mode"] = "offchain"
             await connection.send(json.dumps(hello))
             logger.info(f"📤 Sent hello: {entry_type}")
-
+            
             # Tunggu response
             while True:
                 msg = json.loads(await connection.recv())
                 msg_type = msg.get("type")
-
+                logger.info(f"📨 Received: {msg_type}")  # <-- TAMBAH DEBUG
+                
                 if msg_type in ("assigned", "joined"):
+                    self.current_game = GameState(entry_type=entry_type)  # <-- FIX: reassign
                     self.current_game.game_id = msg.get("gameId")
                     logger.info(f"✅ {msg_type} to game {self.current_game.game_id}")
-
+                    
                     # Wrap connection in WSClient
                     ws = WSClient(self.rest.api_key, self.rest.version)
                     ws._ws = connection
-
+                    
                     # Start gameplay with Hybrid AI
                     await self._play_game(ws)
                     return
-
+                    
                 elif msg_type == "not_selected":
                     logger.warning("❌ Not selected for game")
                     await asyncio.sleep(2)
                     return
-
+                    
                 elif msg_type == "queued":
                     logger.info("⏳ Queued, waiting for match...")
                     continue
-
+                    
                 elif msg_type == "waiting":
                     logger.info("⏳ Waiting for game...")
                     continue
-
+                    
                 elif msg_type == "error":
                     error = msg.get("error", {})
                     code = error.get("code")
                     message = error.get("message", "")
                     logger.error(f"❌ Server error: {code} - {message}")
-
+                    
                     if code == "AGENT_TOKEN_REQUIRED":
                         raise AgentTokenRequiredError("Agent token required!")
                     if code == "BLOCKED":
                         logger.warning("⛔ Account blocked - check API key")
                         await asyncio.sleep(5)
                         return
-
+                    
                     raise RuntimeError(f"Error from server: {msg}")
-
+                    
                 else:
                     logger.debug(f"📨 Unknown message: {msg_type}")
-
-        except ResumeTargetDeadError:
-            if entry_type == "free":
-                logger.info("🔄 Free game target dead, fallback to matchmaking...")
-                raise
-            else:
-                raise
+                    
         except Exception as e:
             logger.error(f"❌ Failed to join game: {e}")
+            import traceback
+            logger.error(traceback.format_exc())  # <-- TAMBAH DEBUG
             raise
 
     async def _resume_game(self, entry_type: str):
