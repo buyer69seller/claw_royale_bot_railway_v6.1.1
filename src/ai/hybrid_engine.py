@@ -2,16 +2,20 @@
 """Hybrid AI Engine - Gabungan AI Auto-Pilot + Competitive v7"""
 
 import logging
+import math
 from typing import Dict, Any, Optional, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from .perception import PerceivedState
-from .decision import AIDecision
+from .perception import PerceivedState, PerceptionEngine
+from .analyzer import GameAnalyzer
+from .decision import DecisionEngine, AIDecision  # <-- TAMBAHKAN IMPORT
 from .risk import RiskAssessor
+from .knowledge import KnowledgeBase
 from ..game.state import GameState
 from ..core.constants import ACTION_INTERVAL_SECONDS
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class ThreatAssessment:
@@ -21,9 +25,11 @@ class ThreatAssessment:
     survival_chance: float
     escape_chance: float
     zone_threat: float
+    risk_score: float
     is_safe: bool
     should_fight: bool
     should_flee: bool
+
 
 @dataclass
 class PriorityDecision:
@@ -43,8 +49,11 @@ class HybridAIEngine:
     """
     
     def __init__(self):
-        self.ai = DecisionEngine()
+        self.ai = DecisionEngine()  # <-- SEKARANG BISA DIGUNAKAN
+        self.perception = PerceptionEngine()
+        self.analyzer = GameAnalyzer()
         self.risk = RiskAssessor()
+        self.knowledge = KnowledgeBase()
         self.turn = 0
         self.kills = 0
         self.survival_time = 0
@@ -71,7 +80,7 @@ class HybridAIEngine:
         self.turn += 1
         
         # Step 1: AI Perception
-        perceived = self.ai.perception.perceive(state)
+        perceived = self.perception.perceive(state)
         
         # Step 2: Threat Assessment (v7)
         threat = await self._assess_threat(perceived, state)
@@ -105,7 +114,7 @@ class HybridAIEngine:
             f"🧠 Hybrid AI: {final_decision.action_type} "
             f"(Priority: {priority_decision.priority}, "
             f"Conf: {final_decision.confidence:.2f}, "
-            f"Threat: {threat.risk_score:.2f})"
+            f"Risk: {threat['risk_score']:.2f})"
         )
         
         return final_decision
@@ -143,7 +152,6 @@ class HybridAIEngine:
             target_def = float(closest.get("defense", closest.get("def", 0)))
             
             # Kill probability
-            target_hp_ratio = target_hp / max(target_max_hp, 1)
             threat["kill_probability"] = max(0, min(1, (my_atk - target_def) / max(target_hp, 1)))
             
             # Damage received
@@ -204,7 +212,6 @@ class HybridAIEngine:
         
         # HP < 30% → HEAL
         if hp_ratio < 0.3:
-            # Cari healing item
             for item in state.get_items():
                 heal = float(item.get("heal", item.get("healAmount", 0)))
                 if heal > 0:
@@ -220,19 +227,15 @@ class HybridAIEngine:
         # HP < 20% → RETREAT
         if hp_ratio < 0.2:
             self.stats["survival_priority"] += 1
-            # Move away from enemies
-            enemies = state.get_enemies()
-            if enemies:
-                # Move to safe region
-                for conn in state.get_connections():
-                    if not conn.get("insideDeathZone", False):
-                        return PriorityDecision(
-                            priority=1,
-                            action_type="move",
-                            target_id=conn.get("regionId"),
-                            reasoning=f"Critical HP ({hp_ratio:.0%}) - retreating",
-                            confidence=0.9
-                        )
+            for conn in state.get_connections():
+                if not conn.get("insideDeathZone", False):
+                    return PriorityDecision(
+                        priority=1,
+                        action_type="move",
+                        target_id=conn.get("regionId"),
+                        reasoning=f"Critical HP ({hp_ratio:.0%}) - retreating",
+                        confidence=0.9
+                    )
         
         # In Cave → EXIT
         if state.in_cave:
@@ -263,7 +266,6 @@ class HybridAIEngine:
         # Alert > 7 → HIDE / RETREAT
         if alert > 7:
             self.stats["survival_priority"] += 1
-            # Move to less dangerous region
             for conn in state.get_connections():
                 if conn.get("safetyScore", 0) > 0.5:
                     return PriorityDecision(
@@ -283,7 +285,6 @@ class HybridAIEngine:
                 item_type = str(item.get("type", item.get("itemType", ""))).lower()
                 value = float(item.get("value", item.get("rarityValue", 0)))
                 
-                # Prioritaskan: Relic > Pack > Potion > sMoltz
                 priority_score = 0
                 if "relic" in item_type:
                     priority_score = 4
@@ -294,7 +295,6 @@ class HybridAIEngine:
                 else:
                     priority_score = 1
                 
-                # Only loot if safe enough
                 if threat["risk_score"] < 0.5 or priority_score > 2:
                     self.stats["loot_priority"] += 1
                     return PriorityDecision(
@@ -314,27 +314,23 @@ class HybridAIEngine:
                     priority=2,
                     action_type="move",
                     target_id=item.get("regionId"),
-                    reasoning=f"Moving to collect item",
+                    reasoning="Moving to collect item",
                     confidence=0.7
                 )
         
         # === PRIORITY 3: KILL ===
         
-        # Only if HP > 50%
         if hp_ratio > 0.5 and threat["should_fight"]:
             enemies = state.get_enemies()
             if enemies:
-                # Target: HP terendah dalam range
                 targetable = [
                     e for e in enemies 
                     if self._distance(me, e) < 10
                 ]
                 if targetable:
-                    # Sort by HP (lowest first)
                     targetable.sort(key=lambda e: float(e.get("hp", 0)))
                     target = targetable[0]
                     
-                    # Check kill probability
                     target_hp = float(target.get("hp", 0))
                     target_def = float(target.get("defense", target.get("def", 0)))
                     kill_prob = (my_atk - target_def) / max(target_hp, 1)
@@ -351,7 +347,6 @@ class HybridAIEngine:
         
         # === PRIORITY 4: EXPLORE ===
         
-        # Ruin in range (distance < 2)
         for obj in state.get_interactables():
             distance = self._distance(me, obj)
             if distance < 2 and "ruin" in str(obj.get("type", obj.get("kind", ""))):
@@ -364,7 +359,6 @@ class HybridAIEngine:
                     confidence=0.75
                 )
         
-        # Ruin in range (distance < 5)
         for obj in state.get_interactables():
             distance = self._distance(me, obj)
             if distance < 5 and "ruin" in str(obj.get("type", obj.get("kind", ""))):
@@ -379,7 +373,6 @@ class HybridAIEngine:
         
         # === FALLBACK: MOVE TOWARDS CENTER ===
         
-        # Move to center (safer)
         for conn in state.get_connections():
             if conn.get("safetyScore", 0) > 0.5:
                 return PriorityDecision(
@@ -390,7 +383,6 @@ class HybridAIEngine:
                     confidence=0.5
                 )
         
-        # Last resort: move to any connection
         for conn in state.get_connections():
             if not conn.get("insideDeathZone", False):
                 return PriorityDecision(
@@ -401,7 +393,6 @@ class HybridAIEngine:
                     confidence=0.3
                 )
         
-        # No action
         return PriorityDecision(
             priority=5,
             action_type="wait",
@@ -412,7 +403,6 @@ class HybridAIEngine:
     async def _hybrid_selection(self, priority: PriorityDecision, ai: AIDecision, perceived: PerceivedState, threat: Dict) -> AIDecision:
         """Memilih antara AI dan Priority decision"""
         
-        # Jika priority confidence tinggi, pakai priority
         if priority.confidence > 0.8:
             return AIDecision(
                 action_type=priority.action_type,
@@ -423,11 +413,9 @@ class HybridAIEngine:
                 expected_value=1 - threat["risk_score"]
             )
         
-        # Jika AI confidence tinggi dan priority tidak urgent, pakai AI
         if ai.confidence > 0.7 and priority.priority > 2:
             return ai
         
-        # Critical priority (1-2) override AI
         if priority.priority <= 2:
             return AIDecision(
                 action_type=priority.action_type,
@@ -438,12 +426,10 @@ class HybridAIEngine:
                 expected_value=1 - threat["risk_score"]
             )
         
-        # Default: AI decision
         return ai
     
     def _distance(self, obj1: Dict, obj2: Dict) -> float:
         """Hitung distance antara dua object"""
-        import math
         x1 = float(obj1.get("x", obj1.get("position", {}).get("x", 0)))
         y1 = float(obj1.get("y", obj1.get("position", {}).get("y", 0)))
         x2 = float(obj2.get("x", obj2.get("position", {}).get("x", 0)))
