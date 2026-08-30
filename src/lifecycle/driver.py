@@ -5,7 +5,7 @@ import asyncio
 import logging
 import time
 from typing import Optional
-
+from ..services.auth_service import AuthService
 from websockets.exceptions import ConnectionClosed
 
 from ..client.rest_client import RestClient
@@ -34,150 +34,60 @@ logger = logging.getLogger(__name__)
 
 
 class Driver:
-    """Driver utama bot dengan AI"""
-
     def __init__(self, rest_client: RestClient):
         self.rest = rest_client
         self.router = StateRouter(rest_client)
         self.version_mgr = VersionManager(rest_client.api_key)
-
+        
         # AI Components
         self.ai = DecisionEngine()
         self.knowledge: Optional[KnowledgeBase] = None
-
+        self.auth_service: Optional[AuthService] = None  # <-- TAMBAH
+        
         # Fallback strategy
         self.strategy = StrategyEngine()
-
+        
         self.current_game: Optional[GameState] = None
         self.delay = MIN_RETRY_DELAY
         self.game_count = 0
         self.ai_enabled = True
 
-    async def run(self):
-        """Loop utama driver"""
-        self.delay = MIN_RETRY_DELAY
+    async def _start_game(self, entry_type: str):
+        """Mulai game baru - menggunakan AuthService"""
+        logger.info(f"🎮 Joining {entry_type} game...")
+        self.current_game = GameState(entry_type=entry_type)
 
-        while True:
-            try:
-                await self.version_mgr.ensure_current(self.rest._session)
-                state_info = await self.router.resolve_state()
-                logger.info(f"State: {state_info['state']} -> {state_info['action']}")
-
-                if state_info["action"] in ["start_free", "start_paid"]:
-                    await self._start_game(state_info["entry_type"])
-                elif state_info["action"] in ["resume_free", "resume_paid"]:
-                    await self._resume_game(state_info["entry_type"])
-                elif state_info["action"] == "idle":
-                    await asyncio.sleep(5)
-                elif state_info["action"] == "error":
-                    await asyncio.sleep(10)
-
-                self.delay = MIN_RETRY_DELAY
-
-            except ResumeTargetDeadError as e:
-                logger.warning(f"Resume target dead: {e}, re-dialing...")
-                await asyncio.sleep(1)
-                self.delay = MIN_RETRY_DELAY
-                continue
-
-            except ConnectionClosed as e:
-                logger.warning(f"WebSocket closed: {e.code} - {e.reason}")
-                if e.code in (1013, 4008, 4030, 4031):
-                    await asyncio.sleep(3)
-                else:
-                    await asyncio.sleep(self.delay)
-                    self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
-
-            except AgentDeadError:
-                logger.info("Agent died, restarting...")
-                if self.current_game and self.knowledge:
-                    self.knowledge.record_outcome("death", {
-                        "kills": self.current_game.kills,
-                        "survival_time": self.current_game.survival_time
-                    })
-                self.current_game = None
-                self.strategy.reset_rejection_counter()
-                await asyncio.sleep(1)
-                self.delay = MIN_RETRY_DELAY
-
-            except NotSelectedError:
-                logger.info("Not selected, retrying...")
-                await asyncio.sleep(2)
-                self.delay = MIN_RETRY_DELAY
-
-            except Exception as e:
-                logger.exception(f"Driver error: {e}")
-                await asyncio.sleep(self.delay)
-                self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
-
-    # src/lifecycle/driver.py - tambahkan method untuk join langsung
-
-async def _start_game(self, entry_type: str):
-    """Mulai game baru - langsung via WebSocket"""
-    logger.info(f"🎮 Joining {entry_type} game via WebSocket...")
-    self.current_game = GameState(entry_type=entry_type)
-
-    try:
-        async with WSClient(self.rest.api_key, self.rest.version) as ws:
-            # Baca welcome
-            welcome = await ws.recv()
-            decision = welcome.get("decision")
-            logger.info(f"📨 Welcome decision: {decision}")
+        try:
+            # Gunakan auth service untuk join
+            if not self.auth_service:
+                from ..services.auth_service import AuthService
+                self.auth_service = AuthService(self.rest)
             
-            # Kirim hello - entry type
-            await ws.send_hello(entry_type)
+            # Join via WebSocket
+            ws = await self.auth_service.join_game_websocket(entry_type)
             
-            # Tunggu response
-            while True:
-                msg = await ws.recv()
-                msg_type = msg.get("type")
-                
-                if msg_type in ("assigned", "joined"):
-                    self.current_game.game_id = msg.get("gameId")
-                    logger.info(f"✅ {msg_type} to game {self.current_game.game_id}")
-                    await self._play_game(ws)
-                    return
-                    
-                elif msg_type == "not_selected":
-                    logger.warning("❌ Not selected for game, retrying...")
-                    await asyncio.sleep(2)
-                    return
-                    
-                elif msg_type == "queued":
-                    logger.info("⏳ Queued, waiting for match...")
-                    continue
-                    
-                elif msg_type == "waiting":
-                    logger.info("⏳ Waiting for game...")
-                    continue
-                    
-                elif msg_type == "error":
-                    error = msg.get("error", {})
-                    code = error.get("code")
-                    message = error.get("message", "")
-                    logger.error(f"❌ Server error: {code} - {message}")
-                    
-                    # Jika BLOCKED, coba free game
-                    if code == "BLOCKED":
-                        logger.info("🔄 Blocked for paid, trying free...")
-                        if entry_type == "paid":
-                            await ws.send_hello("free")
-                            continue
-                    
-                    raise RuntimeError(f"Error from server: {msg}")
-                    
-                else:
-                    logger.debug(f"📨 Unknown message: {msg_type}")
+            # Tunggu assignment
+            assignment = await self.auth_service.wait_for_game_assignment(ws, entry_type)
+            
+            if assignment and assignment.get("type") in ("assigned", "joined"):
+                self.current_game.game_id = assignment.get("gameId")
+                logger.info(f"✅ Game joined: {self.current_game.game_id}")
+                await self._play_game(ws)
+                return
+            else:
+                logger.warning("❌ Failed to join game, retrying...")
+                await asyncio.sleep(3)
+                return
 
-    except ResumeTargetDeadError:
-        if entry_type == "free":
-            logger.info("🔄 Free game target dead, fallback to matchmaking...")
+        except ResumeTargetDeadError:
+            if entry_type == "free":
+                logger.info("🔄 Free game target dead, fallback to matchmaking...")
+                raise
+            else:
+                raise
+        except Exception as e:
+            logger.error(f"❌ Failed to join game: {e}")
             raise
-        else:
-            raise
-    except Exception as e:
-        logger.error(f"❌ Failed to join game: {e}")
-        raise
 
     async def _resume_game(self, entry_type: str):
         """Resume game yang sedang berjalan"""
