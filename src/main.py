@@ -82,24 +82,30 @@ async def main():
     logger.info("✅ Health server started on port 8080")
     
     # Start bot
-    async with RestClient(API_KEY) as rest:
-        # Auto-claim rewards at startup
+     async with RestClient(API_KEY) as rest:
+        # Auto-claim rewards (jangan gagalkan boot jika error)
         try:
             reward_service = RewardService(rest)
+            await reward_service.redeem_welcome_bundle()
             
-            # Welcome bundle
-            if await reward_service.redeem_welcome_bundle():
-                logger.info("🎁 Welcome bundle claimed!")
-            
-            # Check available rewards
             available = await reward_service.get_available_rewards()
             if available.get("daily") or available.get("quests"):
-                logger.info(f"📦 Rewards available: {available}")
                 result = await reward_service.check_and_claim_rewards()
                 if result["claimed"]:
                     logger.info(f"🎉 Claimed: {result['claimed']}")
         except Exception as e:
-            logger.warning(f"⚠️ Failed to check rewards: {e}")
+            logger.debug(f"Reward check skipped: {e}")
+        
+        # Optimize loadout (jangan gagalkan boot jika error)
+        try:
+            loadout_service = LoadoutService(rest)
+            if not await loadout_service.is_full_set():
+                logger.info("🔧 Loadout not full, optimizing...")
+                result = await loadout_service.optimize_loadout()
+                if result.get("changes"):
+                    logger.info(f"✅ Loadout optimized: {result['changes']}")
+        except Exception as e:
+            logger.debug(f"Loadout optimization skipped: {e}")
         
         # Optimize loadout
         try:
