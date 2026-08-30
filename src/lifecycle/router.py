@@ -23,13 +23,15 @@ class StateRouter:
     async def determine_state(self) -> GameState:
         try:
             account = await self.rest.get_account()
-            logger.info(f"📡 Account data: {account}")
             
             readiness = account.get("readiness", {})
             current_games = account.get("currentGames", [])
             
-            logger.info(f"📊 Readiness: {readiness}")
-            logger.info(f"🎮 Current games: {current_games}")
+            # Log readiness issues
+            if not readiness.get("agentToken"):
+                logger.info("ℹ️ No agent token - will try to join via WebSocket")
+            if not readiness.get("sMoltzSufficient"):
+                logger.info("ℹ️ Insufficient sMoltz - will try free games")
             
             self.live_games = {}
             for game in current_games:
@@ -37,6 +39,7 @@ class StateRouter:
                 if entry_type and game.get("isAlive") and game.get("gameStatus") != "finished":
                     self.live_games[entry_type] = game
             
+            # Cek game live
             if "free" in self.live_games:
                 logger.info("✅ Free game live, resuming...")
                 return GameState.IN_GAME_FREE
@@ -44,10 +47,15 @@ class StateRouter:
                 logger.info("✅ Paid game live, resuming...")
                 return GameState.IN_GAME_PAID
             
+            # Cek readiness
             free_ready = readiness.get("free", {}).get("ready", False)
             paid_ready = readiness.get("paid", {}).get("ready", False)
             
-            logger.info(f"🔓 Free ready: {free_ready}, Paid ready: {paid_ready}")
+            # Jika tidak ready, tetap coba join via WebSocket
+            if not free_ready and not paid_ready:
+                logger.info("🔄 No readiness - attempting direct WebSocket join...")
+                # Coba join free game via WebSocket
+                return GameState.READY_FREE
             
             if free_ready:
                 logger.info("✅ Free game ready, starting...")
@@ -67,12 +75,17 @@ class StateRouter:
         state = await self.determine_state()
         self.current_state = state
         
+        # Default ke free jika tidak ada state
         if state in [GameState.READY_FREE, GameState.IN_GAME_FREE]:
             entry_type = "free"
         elif state in [GameState.READY_PAID, GameState.IN_GAME_PAID]:
             entry_type = "paid"
         else:
+            # Default ke free
             entry_type = "free"
+            if state == GameState.IDLE:
+                logger.info("🔄 Forcing join attempt for free game...")
+                state = GameState.READY_FREE
         
         return {
             "state": state,
