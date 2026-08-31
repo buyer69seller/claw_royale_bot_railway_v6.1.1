@@ -36,7 +36,20 @@ logger = logging.getLogger(__name__)
 
 class Driver:
     """Driver utama bot dengan Hybrid AI + RL + Region Tracking + Hybrid Strategy v7"""
+# src/lifecycle/driver.py - tambahkan method ini
 
+    def set_strategy_mode(self, mode: str):
+        """
+        Set strategi mode untuk Hybrid Strategy v7
+        
+        Args:
+            mode: 'ai_auto_pilot' | 'competitive_v7' | 'hybrid_v7'
+        """
+        if hasattr(self.strategy, 'set_mode'):
+            self.strategy.set_mode(mode)
+            logger.info(f"🎯 Strategy mode set to: {mode}")
+        else:
+            logger.warning(f"⚠️ Strategy mode not supported: {mode}")
     def __init__(self, rest_client: RestClient):
         self.rest = rest_client
         self.router = StateRouter(rest_client)
