@@ -61,6 +61,9 @@ class Driver:
         self.start_time = None
         self.total_actions = 0
         self.successful_actions = 0
+        
+        # Rate limit tracking
+        self._last_action_time = 0
 
     async def run(self):
         """Loop utama driver"""
@@ -111,43 +114,35 @@ class Driver:
                 self.delay = MIN_RETRY_DELAY
                 continue
 
-# src/lifecycle/driver.py - di run() method
-
             except ConnectionClosed as e:
                 logger.warning(f"🔌 WebSocket closed: {e.code} - {e.reason}")
                 
                 # Handle specific close codes
                 if e.code == 1013:
-                    # Resume target dead - rejoin baru
                     logger.info("🔄 Resume target dead, starting new game...")
                     self.current_game = None
                     await asyncio.sleep(2)
                     continue
-                    
                 elif e.code == 4008:
-                    # Rate limit - wait longer
                     logger.warning("⏳ Rate limited, waiting 10s...")
                     await asyncio.sleep(10)
                     self.delay = MIN_RETRY_DELAY
                     continue
-                    
                 elif e.code in (4030, 4031):
-                    # Agent already in game or game full
                     logger.info("🔄 Agent in game or game full, retrying...")
                     await asyncio.sleep(3)
                     continue
-                    
                 elif e.code == 4032:
-                    # Agent dead - restart
                     logger.info("💀 Agent dead (from close code), restarting...")
                     self.current_game = None
                     await asyncio.sleep(2)
                     continue
-                    
                 else:
-                    # Unknown - exponential backoff
-                    await asyncio.sleep(self.delay)
-                    self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
+                    if e.code in (1013, 4008, 4030, 4031):
+                        await asyncio.sleep(3)
+                    else:
+                        await asyncio.sleep(self.delay)
+                        self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
 
             except AgentDeadError:
                 logger.info("💀 Agent died, restarting...")
@@ -458,26 +453,6 @@ class Driver:
         logger.info("👻 Only detecting OWN death, ignoring other agents")
         logger.info("🗺️ Ruin & Alert monitoring active")
 
-
-        # ===== HEARTBEAT / PING =====
-        last_ping_time = __import__('time').time()
-        ping_interval = 30  # 30 detik
-
-        while True:
-            try:
-                # Kirim ping jika diperlukan
-                current_time = __import__('time').time()
-                if current_time - last_ping_time > ping_interval:
-                    try:
-                        await ws.send({"type": "ping"})
-                        last_ping_time = current_time
-                        logger.debug("📤 Sent ping")
-                    except Exception as e:
-                        logger.debug(f"Ping failed: {e}")
-                
-                msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
-                # ... rest of code ...
-
         # Timeout tracking
         last_action_time = __import__('time').time()
         no_action_timeout = 120
@@ -486,15 +461,30 @@ class Driver:
         stuck_counter = 0
         last_hp = 0
         last_turn = 0
+        
+        # Heartbeat tracking
+        last_ping_time = __import__('time').time()
+        ping_interval = 30
 
         while True:
             try:
+                # ===== HEARTBEAT / PING =====
+                current_time = __import__('time').time()
+                if current_time - last_ping_time > ping_interval:
+                    try:
+                        await ws.send({"type": "ping"})
+                        last_ping_time = current_time
+                        logger.debug("📤 Sent ping")
+                    except Exception as e:
+                        logger.debug(f"Ping failed: {e}")
+
                 msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
                 msg_type = msg.get("type")
 
                 if msg_type in ("agent_view", "turn_advanced", "action_sync"):
                     last_view_time = __import__('time').time()
 
+                # ===== CEK TIMEOUT =====
                 current_time = __import__('time').time()
                 if current_time - last_view_time > view_timeout:
                     logger.warning(f"⏰ No view for {view_timeout}s, attempting REJOIN...")
@@ -756,19 +746,22 @@ class Driver:
                 raise
 
     async def _act(self, ws: WSClient, can_act: bool):
-        """Ambil tindakan menggunakan Hybrid AI"""
+        """Ambil tindakan menggunakan Hybrid AI dengan rate limit protection"""
         if not can_act or not self.current_game or not self.current_game.is_alive:
             return
-            # ===== RATE LIMIT PROTECTION =====
-        # Maksimum 1 action per 0.5 detik
-        if hasattr(self, '_last_action_time'):
-            elapsed = __import__('time').time() - self._last_action_time
-            if elapsed < 0.5:
-                logger.debug(f"⏳ Rate limit: waiting {0.5 - elapsed:.2f}s")
-                await asyncio.sleep(0.5 - elapsed)
+
+        # ===== RATE LIMIT PROTECTION =====
+        current_time = __import__('time').time()
+        min_action_interval = 0.5  # Minimal 0.5 detik antar action
         
-        self._last_action_time = __import__('time').time()
+        if self._last_action_time > 0:
+            elapsed = current_time - self._last_action_time
+            if elapsed < min_action_interval:
+                wait_time = min_action_interval - elapsed
+                logger.debug(f"⏳ Rate limit: waiting {wait_time:.2f}s")
+                await asyncio.sleep(wait_time)
         
+        self._last_action_time = current_time
 
         try:
             if self.ai_enabled:
