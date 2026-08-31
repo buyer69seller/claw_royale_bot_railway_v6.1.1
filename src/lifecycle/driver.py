@@ -52,8 +52,8 @@ class Driver:
         self._pack_modifiers_loaded = False
 
         # ===== STRATEGY MODE =====
-        self.strategy_mode = "hybrid"  # default
-        self.scan_clear = None  # akan diinisialisasi jika dibutuhkan
+        self.strategy_mode = "hybrid"
+        self.scan_clear = None
 
         # Game state
         self.current_game: Optional[GameState] = None
@@ -84,14 +84,12 @@ class Driver:
         self._current_region_id: Optional[str] = None
         self._region_loop_detected: bool = False
 
-    # ===== TAMBAHKAN METHOD INI =====
     def set_strategy_mode(self, mode: str):
         """Set strategy mode: 'hybrid' atau 'scan_clear'"""
         if mode in ["hybrid", "scan_clear"]:
             self.strategy_mode = mode
             logger.info(f"🔄 Strategy mode changed to: {mode}")
             if mode == "scan_clear":
-                # Import here to avoid circular import
                 from ..strategy.scan_clear import ScanClearStrategy
                 self.scan_clear = ScanClearStrategy()
                 self.scan_clear.reset()
@@ -152,7 +150,6 @@ class Driver:
             except ConnectionClosed as e:
                 logger.warning(f"🔌 WebSocket closed: {e.code} - {e.reason}")
                 
-                # Handle specific close codes
                 if e.code == 1013:
                     logger.info("🔄 Resume target dead, starting new game...")
                     self.current_game = None
@@ -181,9 +178,6 @@ class Driver:
                         await asyncio.sleep(self.delay)
                         self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
 
-            # =============================================================
-            # ===== INI YANG PALING PENTING: DETEKSI KEMATIAN & RESTART =====
-            # =============================================================
             except AgentDeadError:
                 logger.info("💀 Agent died, restarting...")
                 if self.current_game and self.knowledge:
@@ -193,7 +187,6 @@ class Driver:
                     })
                 self.current_game = None
                 self.strategy.reset_rejection_counter()
-                # Reset hybrid AI stats
                 self.ai.stats = {
                     "decisions_made": 0,
                     "ai_decisions": 0,
@@ -210,7 +203,6 @@ class Driver:
                 await asyncio.sleep(1)
                 self.delay = MIN_RETRY_DELAY
                 logger.info("🔄 Rejoining new game...")
-                # ===== LANJUTKAN LOOP =====
                 continue
 
             except NotSelectedError:
@@ -249,7 +241,6 @@ class Driver:
         self._region_visit_count[region_id] = self._region_visit_count.get(region_id, 0) + 1
         self._current_region_id = region_id
         
-        # Deteksi loop
         visit_count = self._region_visit_count[region_id]
         if visit_count > 3:
             self._region_loop_detected = True
@@ -264,7 +255,6 @@ class Driver:
             main_pack = loadout.get("mainPack", {})
             sub_pack = loadout.get("subPack", {})
             
-            # Set modifiers ke strategy
             self.strategy.set_pack_modifiers(main_pack, sub_pack)
             self._pack_modifiers_loaded = True
             
@@ -288,12 +278,10 @@ class Driver:
         logger.info(f"🎮 Joining {entry_type} game...")
         logger.info(f"🔑 API Key: {self.rest.api_key[:10]}...")
         
-        # ===== RESET REGION TRACKING =====
         self._reset_region_tracking()
         logger.info("🗺️ Region tracking reset for new game")
 
         try:
-            # ===== LOAD PACK MODIFIERS =====
             await self._load_pack_modifiers()
             
             if not self.auth_service:
@@ -387,7 +375,6 @@ class Driver:
         """Resume game yang sedang berjalan"""
         logger.info(f"🔄 Resuming {entry_type} game...")
         
-        # ===== LOAD PACK MODIFIERS =====
         try:
             await self._load_pack_modifiers()
         except Exception as e:
@@ -403,24 +390,18 @@ class Driver:
             raise
 
     async def _rejoin_game(self, entry_type: str):
-        """
-        REJOIN: Kembali ke game yang sedang berjalan
-        Digunakan saat timeout/stuck, bukan restart
-        """
+        """REJOIN: Kembali ke game yang sedang berjalan"""
         logger.info(f"🔄 Attempting to REJOIN {entry_type} game...")
         
-        # ===== LOAD PACK MODIFIERS =====
         try:
             await self._load_pack_modifiers()
         except Exception as e:
             logger.debug(f"Failed to load pack modifiers: {e}")
         
         try:
-            # Cek apakah ada game yang sedang berjalan
             account = await self.rest.get_account()
             current_games = account.get("currentGames", [])
             
-            # Cari game yang masih hidup
             live_game = None
             for game in current_games:
                 if game.get("entryType") == entry_type and game.get("isAlive") and game.get("gameStatus") != "finished":
@@ -437,7 +418,6 @@ class Driver:
             logger.info(f"   - Is Alive: {live_game.get('isAlive')}")
             logger.info(f"   - Status: {live_game.get('gameStatus')}")
             
-            # Rejoin via WebSocket
             if not self.auth_service:
                 from ..services.auth_service import AuthService
                 self.auth_service = AuthService(self.rest)
@@ -459,19 +439,16 @@ class Driver:
             )
             logger.info("✅ WebSocket reconnected!")
             
-            # Baca welcome frame
             welcome = json.loads(await connection.recv())
             decision = welcome.get("decision")
             logger.info(f"📨 Welcome decision: {decision}")
             
-            # Kirim hello dengan entry type yang sama
             hello = {"type": "hello", "entryType": entry_type}
             if entry_type == "paid":
                 hello["mode"] = "offchain"
             await connection.send(json.dumps(hello))
             logger.info(f"📤 Sent hello: {entry_type}")
             
-            # Tunggu response
             while True:
                 msg = json.loads(await connection.recv())
                 msg_type = msg.get("type")
@@ -517,9 +494,6 @@ class Driver:
             logger.info("🔄 Falling back to new game...")
             await self._start_game(entry_type)
 
-    # =============================================================
-    # ===== INI YANG PALING PENTING: DETEKSI KEMATIAN & RESTART =====
-    # =============================================================
     async def _play_game(self, ws: WSClient):
         """Loop gameplay - Fokus deteksi kematian via meta.youDied"""
         logger.info("🎮 Starting Hybrid AI-powered gameplay loop...")
@@ -527,7 +501,6 @@ class Driver:
         logger.info("👻 Only detecting OWN death via meta.youDied")
         logger.info("💀 When you died → restart → join new game")
 
-        # Timeout tracking
         last_action_time = __import__('time').time()
         no_action_timeout = 120
         last_view_time = __import__('time').time()
@@ -536,13 +509,11 @@ class Driver:
         last_hp = 0
         last_turn = 0
         
-        # Heartbeat tracking
         last_ping_time = __import__('time').time()
         ping_interval = 30
 
         while True:
             try:
-                # ===== HEARTBEAT / PING =====
                 current_time = __import__('time').time()
                 if current_time - last_ping_time > ping_interval:
                     try:
@@ -558,7 +529,6 @@ class Driver:
                 if msg_type in ("agent_view", "turn_advanced", "action_sync"):
                     last_view_time = __import__('time').time()
 
-                # ===== CEK TIMEOUT =====
                 current_time = __import__('time').time()
                 if current_time - last_view_time > view_timeout:
                     logger.warning(f"⏰ No view for {view_timeout}s, attempting REJOIN...")
@@ -575,10 +545,9 @@ class Driver:
                         raise AgentDeadError(f"View timeout - rejoin failed: {e}")
 
                 # =============================================================
-                # ===== DETEKSI KEMATIAN DIRI SENDIRI =====
+                # DETEKSI KEMATIAN DIRI SENDIRI
                 # =============================================================
                 if msg_type == "agent_died":
-                    # CEK: apakah ini kematian diri sendiri?
                     if msg.get("meta", {}).get("youDied") is True:
                         self.current_game.mark_dead()
                         if self.knowledge:
@@ -588,14 +557,11 @@ class Driver:
                             })
                         logger.info(f"💀 YOU DIED! Survival: {self.current_game.survival_time}, Kills: {self.current_game.kills}")
                         logger.info("🔄 Restarting and joining new game...")
-                        # ===== KELUAR DARI LOOP =====
                         raise AgentDeadError("You died!")
-                    
-                    # Agent lain mati - IGNORE, lanjutkan
                     continue
 
                 # =============================================================
-                # ===== GAME SELESAI =====
+                # GAME SELESAI
                 # =============================================================
                 if msg_type == "game_settled":
                     self.current_game.mark_finished()
@@ -607,7 +573,6 @@ class Driver:
                             "survival_time": self.current_game.survival_time
                         })
                     self._log_hybrid_stats()
-                    # ===== KELUAR DARI LOOP =====
                     break
 
                 if msg_type == "game_ended":
@@ -620,7 +585,6 @@ class Driver:
                             "survival_time": self.current_game.survival_time
                         })
                     self._log_hybrid_stats()
-                    # ===== KELUAR DARI LOOP =====
                     break
 
                 # ===== CAN_ACT =====
@@ -638,7 +602,6 @@ class Driver:
                     if view:
                         self.current_game.update_view(view, reason)
 
-                        # ===== BACKUP: CEK KEMATIAN DARI VIEW =====
                         if not self.current_game.is_alive:
                             logger.info(f"💀 Agent is dead (from view), restarting...")
                             if self.knowledge:
@@ -648,7 +611,6 @@ class Driver:
                                 })
                             raise AgentDeadError("Agent dead (from view)")
                         
-                        # ===== BACKUP: CEK HP = 0 =====
                         if self.current_game.hp <= 0:
                             logger.info(f"💀 Agent HP is 0, restarting...")
                             if self.knowledge:
@@ -658,7 +620,6 @@ class Driver:
                                 })
                             raise AgentDeadError("Agent HP is 0")
 
-                        # ===== STUCK DETECTION =====
                         if last_hp == self.current_game.hp and last_turn == self.current_game.turn:
                             stuck_counter += 1
                             if stuck_counter > 10:
@@ -686,7 +647,6 @@ class Driver:
                     view = msg.get("view", {})
                     if view:
                         self.current_game.update_view(view, "action_sync")
-                        # ===== BACKUP: CEK KEMATIAN =====
                         if not self.current_game.is_alive:
                             logger.info(f"💀 Agent is dead (from action_sync), restarting...")
                             if self.knowledge:
@@ -705,7 +665,6 @@ class Driver:
                     view = msg.get("view", {})
                     if view:
                         self.current_game.update_view(view, "action_rejected")
-                        # ===== BACKUP: CEK KEMATIAN =====
                         if not self.current_game.is_alive:
                             logger.info(f"💀 Agent is dead (from action_rejected), restarting...")
                             if self.knowledge:
@@ -725,7 +684,6 @@ class Driver:
                     error = msg.get("error")
                     action = msg.get("action")
 
-                    # Track item jika action adalah pickup
                     if action and action.get("type") == "pickup":
                         item_id = action.get("itemInstanceId")
                         if error:
@@ -742,7 +700,6 @@ class Driver:
                         code = error.get("code")
                         message = error.get("message", "")
 
-                        # ===== DETEKSI KEMATIAN DARI ACTION_RESULT =====
                         if code == "AGENT_DEAD":
                             logger.info(f"💀 Agent dead from action_result: {message}")
                             raise AgentDeadError(f"Agent dead: {message}")
@@ -780,16 +737,6 @@ class Driver:
                         ruin_data = msg.get("ruin", {})
                         if ruin_data and self.current_game:
                             self.current_game.update_ruin_state(ruin_data)
-                            ruin_id = ruin_data.get("ruinId", "unknown")[:8]
-                            gauge = ruin_data.get("gauge", 0)
-                            max_gauge = ruin_data.get("maxGauge", 3)
-                            content_type = ruin_data.get("contentType", "unknown")
-                            is_empty = ruin_data.get("isEmpty", False)
-                            
-                            if is_empty:
-                                logger.info(f"🗺️ Ruin {ruin_id} cleared! (content: {content_type})")
-                            else:
-                                logger.debug(f"🗺️ Ruin {ruin_id}: gauge {gauge}/{max_gauge} ({content_type})")
                     except Exception as e:
                         logger.debug(f"Ruin state handler error: {e}")
                     continue
@@ -808,13 +755,8 @@ class Driver:
                         
                         if alert_active:
                             logger.warning(f"⚠️⚠️ ALERT ACTIVE! Gauge: {alert_gauge}/10 ⚠️⚠️")
-                            if self.current_game and self.current_game.can_act:
-                                logger.info("🛡️ Alert active - focusing on survival!")
                         else:
-                            if alert_gauge > 5:
-                                logger.info(f"⚡ Alert gauge: {alert_gauge}/10 (moderate)")
-                            else:
-                                logger.debug(f"📊 Alert gauge: {alert_gauge}/10")
+                            logger.debug(f"📊 Alert gauge: {alert_gauge}/10")
                     except Exception as e:
                         logger.debug(f"Alert gauge handler error: {e}")
                     continue
@@ -828,9 +770,6 @@ class Driver:
             except ResumeTargetDeadError:
                 raise
             except AgentDeadError:
-                # ===== INI YANG PALING PENTING =====
-                # AgentDeadError akan di-catch di run() method
-                # Driver akan restart dan join game baru
                 raise
             except ConnectionClosed as e:
                 if e.code == 1013 and "RESUME_TARGET_DEAD" in str(e.reason):
@@ -840,19 +779,13 @@ class Driver:
                 logger.exception(f"💥 Gameplay error: {e}")
                 raise
         
-        # ===== KELUAR DARI LOOP (game_ended / game_settled) =====
         logger.info("🔄 Game finished, exiting gameplay loop...")
-        # Driver akan kembali ke run() dan join game baru
 
-    # =============================================================
-    # ===== INI YANG PALING PENTING: STRATEGY SELECTOR =====
-    # =============================================================
     async def _act(self, ws: WSClient, can_act: bool):
         """Ambil tindakan berdasarkan strategy yang dipilih"""
         if not can_act or not self.current_game or not self.current_game.is_alive:
             return
 
-        # ===== RATE LIMIT PROTECTION =====
         current_time = __import__('time').time()
         min_action_interval = 0.5
         
@@ -866,9 +799,7 @@ class Driver:
         self._last_action_time = current_time
 
         try:
-            # ===== STRATEGY SELECTOR =====
             if self.strategy_mode == "scan_clear" and self.scan_clear:
-                # Gunakan Scan & Clear Strategy
                 decision = self.scan_clear.decide(self.current_game)
                 action = self._execute_scan_clear_decision(decision)
                 if action:
@@ -877,18 +808,15 @@ class Driver:
                     await asyncio.sleep(ACTION_INTERVAL_SECONDS)
                     return
             else:
-                # Gunakan Hybrid AI (default)
                 if self.ai_enabled:
                     decision = await self.ai.decide(self.current_game)
                     action = self._build_action_from_decision(decision)
                     if action:
                         thought = f"Hybrid AI: {decision.reasoning[0] if decision.reasoning else decision.action_type}"
-                        logger.info(f"📤 Sending action: {action}")
                         await ws.send_action(action, thought=thought)
                         await asyncio.sleep(ACTION_INTERVAL_SECONDS)
                         return
 
-            # Fallback
             await self._act_heuristic(ws, can_act)
 
         except Exception as e:
@@ -896,4 +824,73 @@ class Driver:
             await self._act_heuristic(ws, can_act)
 
     def _execute_scan_clear_decision(self, decision: Dict) -> Optional[Dict]:
-        """Eksek
+        """Eksekusi decision dari Scan & Clear"""
+        if not self.scan_clear:
+            return None
+            
+        kind = decision.get("kind")
+        obj = decision.get("obj")
+        
+        if kind == "pickup":
+            return self.scan_clear.action_builder.pickup(obj)
+        elif kind == "attack":
+            return self.scan_clear.action_builder.attack(obj)
+        elif kind == "move":
+            return self.scan_clear.action_builder.move(obj)
+        elif kind == "interact":
+            return self.scan_clear.action_builder.interact(obj)
+        elif kind == "explore":
+            return self.scan_clear.action_builder.explore(obj)
+        
+        return None
+
+    def _build_action_from_decision(self, decision) -> Optional[Dict]:
+        """Build action from AI decision"""
+        action_type = decision.action_type
+        target_id = decision.target_id
+
+        if action_type == "attack":
+            target = self._find_target(target_id, "enemies")
+            if target:
+                return ActionBuilder.attack(target)
+
+        elif action_type == "pickup":
+            item = self._find_target(target_id, "items")
+            if item:
+                return ActionBuilder.pickup(item)
+
+        elif action_type == "interact":
+            obj = self._find_target(target_id, "interactables")
+            if obj:
+                return ActionBuilder.interact(obj)
+
+        elif action_type == "explore":
+            obj = self._find_target(target_id, "interactables")
+            if obj:
+                return ActionBuilder.explore(obj)
+
+        elif action_type == "move":
+            conn = self._find_target(target_id, "connections")
+            if conn:
+                return ActionBuilder.move(conn)
+        
+        elif action_type == "use":
+            item = self._find_target(target_id, "items")
+            if item:
+                return ActionBuilder.use_item(item)
+            if target_id:
+                return ActionBuilder.use_item_by_id(target_id)
+
+        return None
+
+    def _find_target(self, target_id: str, category: str) -> Optional[Dict]:
+        """Cari target berdasarkan ID dan kategori"""
+        if not self.current_game:
+            return None
+
+        if category == "enemies":
+            for enemy in self.current_game.get_enemies():
+                if enemy.get("id") == target_id or enemy.get("agentId") == target_id:
+                    return enemy
+                if enemy.get("metadata", {}).get("id") == target_id:
+                    return enemy
