@@ -34,7 +34,6 @@ Bot otomatis untuk Claw Royale dengan **AI Auto-Pilot** yang cerdas.
    - `ENTRY_TYPE`: `free` atau `paid` (default: free)
    - `PREFERRED_MODE`: `offchain` atau `onchain`
    - `LOG_LEVEL`: `DEBUG`, `INFO`, `WARNING`, `ERROR`
-
 ## 📁 Struktur
 🤲 Alhamdulillah! Bot Berjalan dengan Baik!
 🎉 Status Final Bot
