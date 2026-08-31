@@ -1,5 +1,5 @@
 # src/ai/hybrid_engine.py
-"""Hybrid AI Engine - Gabungan AI Auto-Pilot + Competitive v7 dengan Item Tracking"""
+"""Hybrid AI Engine - Gabungan AI Auto-Pilot + Competitive v7 + Reinforcement Learning"""
 
 import logging
 import math
@@ -11,6 +11,7 @@ from .analyzer import GameAnalyzer
 from .decision import DecisionEngine, AIDecision
 from .risk import RiskAssessor
 from .knowledge import KnowledgeBase
+from .rl_agent import QLearningAgent
 from ..game.state import GameState
 from ..core.constants import ACTION_INTERVAL_SECONDS
 
@@ -48,6 +49,7 @@ class HybridAIEngine:
     2. Competitive v7 (Heuristic/Priority)
     3. Item Tracking & Validation
     4. Decision Cache untuk performa
+    5. Reinforcement Learning untuk adaptasi
     """
     
     def __init__(self):
@@ -83,16 +85,30 @@ class HybridAIEngine:
         self._cached_nearby_items: List[tuple] = []
         self._cached_enemies: List[Dict] = []
         
+        # ===== REINFORCEMENT LEARNING =====
+        self.rl_agent = QLearningAgent()
+        self.rl_enabled = True
+        self.last_rl_state = None
+        self.last_rl_action = None
+        self.rl_learning_mode = True
+        
+        # RL Stats
+        self.rl_stats = {
+            "rl_decisions": 0,
+            "exploration_decisions": 0,
+            "exploitation_decisions": 0,
+            "avg_rl_reward": 0
+        }
+        
     async def decide(self, state: GameState) -> AIDecision:
         """
-        Hybrid decision making dengan cache
+        Hybrid decision making dengan cache dan RL
         """
         self.turn += 1
         
         # ===== OPTIMASI: Early exit jika HP sangat rendah =====
         hp_ratio = state.hp_ratio()
         if hp_ratio < 0.15:
-            # Critical HP - langsung cari healing
             healing_items = state.get_healing_items()
             for item in healing_items[:3]:
                 heal = float(item.get("heal", item.get("healAmount", 0)))
@@ -113,7 +129,6 @@ class HybridAIEngine:
                             )
         
         # ===== OPTIMASI: Cache check =====
-        # Cached decisions are valid for 1 turn only, and only if HP hasn't changed much
         if self.turn > 1 and self.turn == self._last_turn + 1:
             hp_changed = abs(hp_ratio - self._last_hp) < 0.05
             cached = self._decision_cache.get(self.turn - 1)
@@ -141,13 +156,23 @@ class HybridAIEngine:
             self.risk.assess_current_situation(perceived)
         )
         
-        # Step 5: Hybrid Selection
-        final_decision = await self._hybrid_selection(
-            priority_decision, 
-            ai_decision, 
-            perceived, 
-            threat
-        )
+        # ===== Step 5: RL DECISION =====
+        rl_decision = None
+        if self.rl_enabled and self.turn > 10:  # Start after 10 turns
+            available_actions = self._get_available_actions(state)
+            rl_decision = await self._rl_decision(state, available_actions)
+        
+        # ===== Step 6: HYBRID SELECTION dengan RL =====
+        if rl_decision and rl_decision.confidence > 0.6:
+            # Gunakan RL decision jika confidence cukup
+            final_decision = await self._rl_hybrid_selection(
+                rl_decision, priority_decision, ai_decision, threat
+            )
+        else:
+            # Gunakan hybrid selection normal
+            final_decision = await self._hybrid_selection(
+                priority_decision, ai_decision, perceived, threat
+            )
         
         # Update stats
         self.stats["decisions_made"] += 1
@@ -174,7 +199,6 @@ class HybridAIEngine:
         
         # ===== OPTIMASI: Update cache =====
         if len(self._decision_cache) > self._max_cache_size:
-            # Remove oldest entries
             oldest_keys = sorted(self._decision_cache.keys())[:10]
             for key in oldest_keys:
                 del self._decision_cache[key]
@@ -213,13 +237,10 @@ class HybridAIEngine:
             enemies = state.get_enemies()
             valid_enemies = [e for e in enemies if isinstance(e, dict)]
             
-            # ===== OPTIMASI: Limited enemies for threat =====
             if len(valid_enemies) > 8:
-                # Sort by distance, take closest
                 valid_enemies.sort(key=lambda e: state._calculate_distance(me, e))
                 valid_enemies = valid_enemies[:8]
             
-            # Guardian detection
             guardian_nearby = False
             guardian_distance = 999.0
             
@@ -239,28 +260,19 @@ class HybridAIEngine:
                 threat["should_fight"] = False
             
             if valid_enemies:
-                # Take closest enemy
                 closest = min(valid_enemies, key=lambda e: self._distance(me, e))
                 target_hp = float(closest.get("hp", 0))
                 target_max_hp = float(closest.get("maxHp", 1))
                 target_atk = float(closest.get("attack", closest.get("atk", 0)))
                 target_def = float(closest.get("defense", closest.get("def", 0)))
                 
-                # Kill probability
                 threat["kill_probability"] = max(0, min(1, (my_atk - target_def) / max(target_hp, 1)))
-                
-                # Damage received
                 turns_to_kill = target_hp / max(my_atk - target_def, 1)
                 threat["damage_received"] = (target_atk - my_def) * turns_to_kill
-                
-                # Survival chance
                 threat["survival_chance"] = max(0, min(1, 1 - (threat["damage_received"] / max(my_hp, 1))))
-                
-                # Escape chance
                 enemy_density = len(valid_enemies)
                 threat["escape_chance"] = max(0, min(1, 1 - (enemy_density / 10)))
                 
-                # Should fight?
                 threat["should_fight"] = (
                     hp_ratio > 0.5 and 
                     threat["kill_probability"] > 0.6 and
@@ -268,7 +280,6 @@ class HybridAIEngine:
                     not guardian_nearby
                 )
                 
-                # Should flee?
                 threat["should_flee"] = (
                     hp_ratio < 0.3 or
                     threat["survival_chance"] < 0.5 or
@@ -297,9 +308,7 @@ class HybridAIEngine:
         return threat
     
     async def _priority_decision(self, perceived: PerceivedState, state: GameState, threat: Dict) -> PriorityDecision:
-        """
-        v7 Priority-based decision dengan optimasi loop
-        """
+        """v7 Priority-based decision dengan optimasi loop"""
         
         try:
             me = state.get_self()
@@ -312,19 +321,17 @@ class HybridAIEngine:
             alert = state.get_region().get("alertGauge", 0)
             my_atk = float(me.get("attack", me.get("atk", 0)))
             
-            # ===== OPTIMASI: Pre-filter items by distance =====
+            # Pre-filter items
             all_items = state.get_items()
             nearby_items = []
             self_pos = state.get_self()
             
-            # Only process first 20 items (most relevant)
             for item in all_items[:20]:
                 if isinstance(item, dict):
                     distance = state._calculate_distance(self_pos, item)
-                    if distance < 5:  # Only consider nearby items
+                    if distance < 5:
                         nearby_items.append((item, distance))
             
-            # Sort by distance
             nearby_items.sort(key=lambda x: x[1])
             
             # === PRIORITY 1: SURVIVAL ===
@@ -371,7 +378,7 @@ class HybridAIEngine:
             if hp_ratio < 0.2:
                 self.stats["survival_priority"] += 1
                 connections = state.get_connections()
-                for conn in connections[:5]:  # Only check first 5
+                for conn in connections[:5]:
                     if isinstance(conn, dict) and not conn.get("insideDeathZone", False):
                         return PriorityDecision(
                             priority=1,
@@ -429,7 +436,6 @@ class HybridAIEngine:
             
             # === PRIORITY 2: LOOT ===
             
-            # Collect items in range (from nearby_items)
             for item, distance in nearby_items[:8]:
                 if not isinstance(item, dict):
                     continue
@@ -450,10 +456,9 @@ class HybridAIEngine:
             if hp_ratio > 0.5 and threat.get("should_fight", False):
                 enemies = state.get_enemies()
                 if enemies:
-                    # Get targetable enemies (within range)
                     targetable = []
                     self_pos = state.get_self()
-                    for e in enemies[:10]:  # Limit to 10 enemies
+                    for e in enemies[:10]:
                         if not isinstance(e, dict):
                             continue
                         dist = self._distance(self_pos, e)
@@ -461,7 +466,6 @@ class HybridAIEngine:
                             targetable.append((e, dist))
                     
                     if targetable:
-                        # Sort by HP (lowest first)
                         targetable.sort(key=lambda x: float(x[0].get("hp", 0)))
                         target, dist = targetable[0]
                         
@@ -479,7 +483,7 @@ class HybridAIEngine:
                                 confidence=min(kill_prob, 0.9)
                             )
             
-            # === PRIORITY 4: EXPLORE (DENGAN RUIN FARMING) ===
+            # === PRIORITY 4: EXPLORE ===
             
             if hp_ratio > 0.6 and alert < 6:
                 interactables = state.get_interactables()
@@ -508,7 +512,7 @@ class HybridAIEngine:
                                 confidence=0.65
                             )
             
-            # === FALLBACK: MOVE TOWARDS CENTER ===
+            # === FALLBACK: MOVE ===
             
             connections = state.get_connections()
             for conn in connections[:5]:
@@ -541,8 +545,214 @@ class HybridAIEngine:
             confidence=0.1
         )
     
-    async def _hybrid_selection(self, priority: PriorityDecision, ai: AIDecision, perceived: PerceivedState, threat: Dict) -> AIDecision:
-        """Memilih antara AI dan Priority decision"""
+    # ===== REINFORCEMENT LEARNING METHODS =====
+    
+    def _get_available_actions(self, state: GameState) -> List[str]:
+        """Dapatkan daftar action yang tersedia untuk RL"""
+        actions = []
+        
+        if state.get_enemies():
+            actions.append("attack")
+        
+        if state.get_valid_items():
+            actions.append("pickup")
+        
+        if state.get_connections():
+            actions.append("move")
+        
+        if state.get_interactables():
+            # Cek apakah ada ruin untuk explore
+            for obj in state.get_interactables():
+                if "ruin" in str(obj.get("type", obj.get("kind", ""))):
+                    actions.append("explore")
+                    break
+            actions.append("interact")
+        
+        if state.has_healing_items():
+            actions.append("use")
+        
+        actions.append("wait")
+        
+        return actions
+    
+    def _action_to_priority(self, action: str, state: GameState) -> Optional[PriorityDecision]:
+        """Konversi action RL ke PriorityDecision"""
+        if action == "attack":
+            enemies = state.get_enemies()
+            if enemies:
+                # Pilih target dengan HP terendah
+                target = min(enemies, key=lambda e: e.get("hp", 0))
+                target_id = target.get("agentId") or target.get("monsterId") or target.get("id")
+                if target_id:
+                    return PriorityDecision(
+                        priority=3,
+                        action_type="attack",
+                        target_id=target_id,
+                        reasoning="RL: Attack",
+                        confidence=0.7
+                    )
+        elif action == "pickup":
+            items = state.get_valid_items()
+            if items:
+                # Pilih item dengan value tertinggi
+                best_item = max(items, key=lambda i: i.get("value", 0))
+                item_id = best_item.get("instanceId") or best_item.get("id")
+                if item_id:
+                    return PriorityDecision(
+                        priority=2,
+                        action_type="pickup",
+                        target_id=item_id,
+                        reasoning="RL: Pickup",
+                        confidence=0.7
+                    )
+        elif action == "move":
+            connections = state.get_connections()
+            if connections:
+                # Pilih koneksi dengan safety tertinggi
+                best_conn = max(connections, key=lambda c: c.get("safetyScore", 0))
+                region_id = best_conn.get("regionId")
+                if region_id:
+                    return PriorityDecision(
+                        priority=4,
+                        action_type="move",
+                        target_id=region_id,
+                        reasoning="RL: Move",
+                        confidence=0.6
+                    )
+        elif action == "explore":
+            interactables = state.get_interactables()
+            for obj in interactables:
+                if "ruin" in str(obj.get("type", obj.get("kind", ""))):
+                    obj_id = obj.get("interactableId") or obj.get("id")
+                    if obj_id:
+                        return PriorityDecision(
+                            priority=4,
+                            action_type="explore",
+                            target_id=obj_id,
+                            reasoning="RL: Explore",
+                            confidence=0.7
+                        )
+        elif action == "interact":
+            interactables = state.get_interactables()
+            if interactables:
+                # Pilih interactable dengan value tertinggi
+                best_obj = max(interactables, key=lambda o: o.get("value", 0))
+                obj_id = best_obj.get("interactableId") or best_obj.get("id")
+                if obj_id:
+                    return PriorityDecision(
+                        priority=4,
+                        action_type="interact",
+                        target_id=obj_id,
+                        reasoning="RL: Interact",
+                        confidence=0.6
+                    )
+        elif action == "use":
+            if state.has_healing_items():
+                heal_item = state.get_best_healing_item()
+                if heal_item:
+                    item_id = heal_item.get("instanceId") or heal_item.get("id")
+                    if item_id:
+                        return PriorityDecision(
+                            priority=1,
+                            action_type="use",
+                            target_id=item_id,
+                            reasoning="RL: Use item",
+                            confidence=0.8
+                        )
+        elif action == "wait":
+            return PriorityDecision(
+                priority=5,
+                action_type="wait",
+                reasoning="RL: Wait",
+                confidence=0.3
+            )
+        
+        return None
+    
+    async def _rl_decision(self, state: GameState, available_actions: List[str]) -> Optional[PriorityDecision]:
+        """
+        Ambil keputusan menggunakan Reinforcement Learning
+        """
+        if not self.rl_enabled or not available_actions:
+            return None
+        
+        # Extract state features
+        rl_state = self.rl_agent.get_state_features(state)
+        
+        # Pilih action dari RL (epsilon-greedy)
+        action, is_exploration = self.rl_agent.choose_action(rl_state, available_actions)
+        
+        # Log RL decision
+        if is_exploration:
+            self.rl_stats["exploration_decisions"] += 1
+            logger.debug(f"🧠 RL Exploration: {action}")
+        else:
+            self.rl_stats["exploitation_decisions"] += 1
+            q_value = self.rl_agent.get_q_value(rl_state, action)
+            logger.debug(f"🧠 RL Exploitation: {action} (Q: {q_value:.2f})")
+        
+        self.rl_stats["rl_decisions"] += 1
+        
+        # Simpan state untuk update reward nanti
+        self.last_rl_state = rl_state
+        self.last_rl_action = action
+        
+        # Konversi ke PriorityDecision
+        return self._action_to_priority(action, state)
+    
+    def _update_rl_reward(self, state: GameState, action: str, success: bool):
+        """
+        Update RL reward setelah action dieksekusi
+        """
+        if not self.rl_enabled or not self.last_rl_state:
+            return
+        
+        # Hitung reward
+        reward = self.rl_agent.get_reward(state, action, success)
+        
+        # Dapatkan next state
+        next_state = self.rl_agent.get_state_features(state)
+        
+        # Update Q-learning
+        done = not state.is_alive or state.is_finished
+        self.rl_agent.learn(
+            state=self.last_rl_state,
+            action=action,
+            reward=reward,
+            next_state=next_state,
+            done=done
+        )
+        
+        # Update stats
+        total = self.rl_stats["rl_decisions"]
+        avg = self.rl_stats["avg_rl_reward"]
+        self.rl_stats["avg_rl_reward"] = (avg * (total - 1) + reward) / max(total, 1)
+        
+        # Log reward
+        if abs(reward) > 0.3:
+            logger.debug(f"📊 RL Reward: {reward:.2f} for {action}")
+        
+        # Reset untuk action berikutnya
+        self.last_rl_state = None
+        self.last_rl_action = None
+    
+    async def _rl_hybrid_selection(self, rl: PriorityDecision, priority: PriorityDecision, ai: AIDecision, threat: Dict) -> AIDecision:
+        """
+        Hybrid selection dengan RL
+        """
+        # RL priority (1-5)
+        rl_priority = rl.priority
+        
+        # Jika RL adalah survival (priority 1), gunakan RL
+        if rl_priority == 1 and rl.confidence > 0.5:
+            return AIDecision(
+                action_type=rl.action_type,
+                target_id=rl.target_id,
+                confidence=rl.confidence,
+                reasoning=[rl.reasoning, "RL Survival"],
+                risk_score=threat.get("risk_score", 0.3),
+                expected_value=0.9
+            )
         
         # Jika priority confidence tinggi, pakai priority
         if priority.confidence > 0.8:
@@ -559,7 +769,7 @@ class HybridAIEngine:
         if ai.confidence > 0.7 and priority.priority > 2:
             return ai
         
-        # Critical priority (1-2) override AI
+        # Critical priority (1-2) override
         if priority.priority <= 2:
             return AIDecision(
                 action_type=priority.action_type,
@@ -570,7 +780,46 @@ class HybridAIEngine:
                 expected_value=1 - threat.get("risk_score", 0.5)
             )
         
+        # RL vs AI: pilih berdasarkan confidence
+        if rl.confidence > ai.confidence + 0.1:
+            return AIDecision(
+                action_type=rl.action_type,
+                target_id=rl.target_id,
+                confidence=rl.confidence,
+                reasoning=[rl.reasoning, "RL preferred"],
+                risk_score=threat.get("risk_score", 0.4),
+                expected_value=0.7
+            )
+        
         # Default: AI decision
+        return ai
+    
+    async def _hybrid_selection(self, priority: PriorityDecision, ai: AIDecision, perceived: PerceivedState, threat: Dict) -> AIDecision:
+        """Memilih antara AI dan Priority decision"""
+        
+        if priority.confidence > 0.8:
+            return AIDecision(
+                action_type=priority.action_type,
+                target_id=priority.target_id,
+                confidence=priority.confidence,
+                reasoning=[priority.reasoning, "Priority-based"],
+                risk_score=threat.get("risk_score", 0.5),
+                expected_value=1 - threat.get("risk_score", 0.5)
+            )
+        
+        if ai.confidence > 0.7 and priority.priority > 2:
+            return ai
+        
+        if priority.priority <= 2:
+            return AIDecision(
+                action_type=priority.action_type,
+                target_id=priority.target_id,
+                confidence=priority.confidence,
+                reasoning=[priority.reasoning, "Emergency priority"],
+                risk_score=threat.get("risk_score", 0.5),
+                expected_value=1 - threat.get("risk_score", 0.5)
+            )
+        
         return ai
     
     def _distance(self, obj1, obj2) -> float:
@@ -606,5 +855,10 @@ class HybridAIEngine:
             **self.stats,
             "cache_hits": self._cache_hits,
             "cache_misses": self._cache_misses,
-            "cache_hit_rate": self._cache_hits / max(self._cache_hits + self._cache_misses, 1) * 100
+            "cache_hit_rate": self._cache_hits / max(self._cache_hits + self._cache_misses, 1) * 100,
+            "rl": self.rl_stats
         }
+    
+    def get_rl_stats(self) -> Dict:
+        """Dapatkan statistik RL"""
+        return self.rl_agent.get_stats()
