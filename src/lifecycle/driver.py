@@ -91,7 +91,7 @@ class Driver:
                     await self._start_game(state_info["entry_type"])
                 elif state_info["action"] in ["resume_free", "resume_paid"]:
                     logger.info(f"🔄 Attempting to resume game: {state_info['action']}")
-                    await self._resume_game(state_info["entry_type"])
+                    await self._rejoin_game(state_info["entry_type"])
                 elif state_info["action"] == "idle":
                     logger.info("⏳ Idle, waiting for game...")
                     await asyncio.sleep(5)
@@ -266,17 +266,126 @@ class Driver:
             logger.info(f"{entry_type} resume target dead, re-dialing...")
             raise
 
+    async def _rejoin_game(self, entry_type: str):
+        """
+        REJOIN: Kembali ke game yang sedang berjalan
+        Digunakan saat timeout/stuck, bukan restart
+        """
+        logger.info(f"🔄 Attempting to REJOIN {entry_type} game...")
+        
+        try:
+            # Cek apakah ada game yang sedang berjalan
+            account = await self.rest.get_account()
+            current_games = account.get("currentGames", [])
+            
+            # Cari game yang masih hidup
+            live_game = None
+            for game in current_games:
+                if game.get("entryType") == entry_type and game.get("isAlive") and game.get("gameStatus") != "finished":
+                    live_game = game
+                    break
+            
+            if not live_game:
+                logger.info("ℹ️ No live game found, starting new game...")
+                await self._start_game(entry_type)
+                return
+            
+            logger.info(f"✅ Found live game: {live_game.get('gameId')}")
+            logger.info(f"   - Entry Type: {live_game.get('entryType')}")
+            logger.info(f"   - Is Alive: {live_game.get('isAlive')}")
+            logger.info(f"   - Status: {live_game.get('gameStatus')}")
+            
+            # Rejoin via WebSocket
+            if not self.auth_service:
+                from ..services.auth_service import AuthService
+                self.auth_service = AuthService(self.rest)
+            
+            headers = await self.auth_service.get_websocket_auth()
+            
+            import websockets
+            import json
+            from ..core.constants import JOIN_WS
+            
+            logger.info(f"🔗 Reconnecting to {JOIN_WS}...")
+            
+            connection = await websockets.connect(
+                JOIN_WS,
+                additional_headers=headers,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=5
+            )
+            logger.info("✅ WebSocket reconnected!")
+            
+            # Baca welcome frame
+            welcome = json.loads(await connection.recv())
+            decision = welcome.get("decision")
+            logger.info(f"📨 Welcome decision: {decision}")
+            
+            # Kirim hello dengan entry type yang sama
+            hello = {"type": "hello", "entryType": entry_type}
+            if entry_type == "paid":
+                hello["mode"] = "offchain"
+            await connection.send(json.dumps(hello))
+            logger.info(f"📤 Sent hello: {entry_type}")
+            
+            # Tunggu response
+            while True:
+                msg = json.loads(await connection.recv())
+                msg_type = msg.get("type")
+                logger.info(f"📨 Received: {msg_type}")
+                
+                if msg_type in ("assigned", "joined"):
+                    self.current_game = GameState(entry_type=entry_type)
+                    self.current_game.game_id = msg.get("gameId")
+                    logger.info(f"✅ REJOIN success! {msg_type} to game {self.current_game.game_id}")
+                    
+                    ws = WSClient(self.rest.api_key, self.rest.version)
+                    ws._ws = connection
+                    
+                    await self._play_game(ws)
+                    return
+                    
+                elif msg_type == "queued":
+                    logger.info("⏳ Queued, waiting for match...")
+                    continue
+                    
+                elif msg_type == "waiting":
+                    logger.info("⏳ Waiting for game...")
+                    continue
+                    
+                elif msg_type == "error":
+                    error = msg.get("error", {})
+                    code = error.get("code")
+                    message = error.get("message", "")
+                    logger.error(f"❌ Server error: {code} - {message}")
+                    
+                    if code == "GAME_NOT_FOUND":
+                        logger.info("ℹ️ Game not found, starting new game...")
+                        await self._start_game(entry_type)
+                        return
+                    
+                    raise RuntimeError(f"Error from server: {msg}")
+                    
+                else:
+                    logger.debug(f"📨 Unknown message: {msg_type}")
+                    
+        except Exception as e:
+            logger.error(f"❌ Failed to rejoin game: {e}")
+            logger.info("🔄 Falling back to new game...")
+            await self._start_game(entry_type)
+
     async def _play_game(self, ws: WSClient):
-        """Loop gameplay dengan Hybrid AI - dengan timeout detection"""
+        """Loop gameplay dengan Hybrid AI - dengan REJOIN on timeout"""
         logger.info("🎮 Starting Hybrid AI-powered gameplay loop...")
         logger.info("🧠 Hybrid AI = AI Auto-Pilot + Competitive v7")
         logger.info("👻 Only detecting OWN death, ignoring other agents")
 
         # Timeout tracking
         last_action_time = __import__('time').time()
-        no_action_timeout = 60
+        no_action_timeout = 120
         last_view_time = __import__('time').time()
-        view_timeout = 45
+        view_timeout = 90  # 90 detik sebelum rejoin
         stuck_counter = 0
         last_hp = 0
         last_turn = 0
@@ -293,8 +402,23 @@ class Driver:
                 # ===== CEK TIMEOUT =====
                 current_time = __import__('time').time()
                 if current_time - last_view_time > view_timeout:
-                    logger.warning(f"⏰ No view for {view_timeout}s, forcing restart...")
-                    raise AgentDeadError("View timeout - forcing restart")
+                    logger.warning(f"⏰ No view for {view_timeout}s, attempting REJOIN...")
+                    
+                    # Coba rejoin dulu, baru restart jika gagal
+                    try:
+                        if self.current_game:
+                            entry_type = self.current_game.entry_type
+                            logger.info(f"🔄 Attempting rejoin to {entry_type} game...")
+                            await self._rejoin_game(entry_type)
+                            return  # Rejoin berhasil, exit loop
+                        else:
+                            logger.warning("⚠️ No current game to rejoin, starting new...")
+                            await self._start_game("free")
+                            return
+                    except Exception as e:
+                        logger.error(f"❌ Rejoin failed: {e}")
+                        logger.warning("🔄 Forcing restart...")
+                        raise AgentDeadError(f"View timeout - rejoin failed: {e}")
 
                 # ===== HANYA DETEKSI KEMATIAN DIRI SENDIRI =====
                 if msg_type == "agent_died":
@@ -376,8 +500,13 @@ class Driver:
                         if last_hp == self.current_game.hp and last_turn == self.current_game.turn:
                             stuck_counter += 1
                             if stuck_counter > 10:
-                                logger.warning(f"⚠️ Game stuck for {stuck_counter} turns, forcing restart...")
-                                raise AgentDeadError("Game stuck - forcing restart")
+                                logger.warning(f"⚠️ Game stuck for {stuck_counter} turns, attempting rejoin...")
+                                try:
+                                    await self._rejoin_game(self.current_game.entry_type)
+                                    return
+                                except Exception as e:
+                                    logger.error(f"❌ Rejoin on stuck failed: {e}")
+                                    raise AgentDeadError("Game stuck - rejoin failed")
                         else:
                             stuck_counter = 0
                         last_hp = self.current_game.hp
