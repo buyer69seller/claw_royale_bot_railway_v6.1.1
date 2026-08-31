@@ -32,7 +32,27 @@ class HybridStrategyV7:
     Mode 2: Competitive v7 (Heuristic Priority)
     Mode 3: Hybrid v7 (AI + Heuristic + Priority)
     """
-    
+    # src/strategy/hybrid_strategy.py - tambahkan method
+
+    def set_mode(self, mode: str):
+        """
+        Set strategi mode secara manual
+        
+        Args:
+            mode: 'ai_auto_pilot' | 'competitive_v7' | 'hybrid_v7'
+        """
+        mode_map = {
+            'ai_auto_pilot': StrategyMode.AI_AUTO_PILOT,
+            'competitive_v7': StrategyMode.COMPETITIVE_V7,
+            'hybrid_v7': StrategyMode.HYBRID_V7
+        }
+        
+        if mode in mode_map:
+            self.current_mode = mode_map[mode]
+            logger.info(f"🎯 Strategy mode manually set to: {mode}")
+        else:
+            logger.warning(f"⚠️ Unknown strategy mode: {mode}")
+            
     def __init__(self):
         self.action_builder = ActionBuilder()
         self.turn = 0
