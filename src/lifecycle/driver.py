@@ -1,5 +1,5 @@
 # src/lifecycle/driver.py
-"""Driver utama dengan Hybrid AI (AI Auto-Pilot + Competitive v7) + RL + Region Tracking"""
+"""Driver utama dengan Hybrid AI + RL + Scan & Clear Strategy"""
 
 import asyncio
 import logging
@@ -13,6 +13,7 @@ from ..client.ws_client import WSClient
 from ..game.state import GameState
 from ..game.actions import ActionBuilder
 from ..strategy.engine import StrategyEngine
+from ..strategy.scan_clear import ScanClearStrategy
 from .router import StateRouter
 from .version_manager import VersionManager
 from ..core.exceptions import (
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 class Driver:
-    """Driver utama bot dengan Hybrid AI + RL + Region Tracking"""
+    """Driver utama bot dengan Hybrid AI + RL + Scan & Clear Strategy"""
 
     def __init__(self, rest_client: RestClient):
         self.rest = rest_client
@@ -50,6 +51,10 @@ class Driver:
         # Fallback strategy (heuristic)
         self.strategy = StrategyEngine()
         self._pack_modifiers_loaded = False
+
+        # ===== SCAN & CLEAR STRATEGY =====
+        self.scan_clear = ScanClearStrategy()
+        self.strategy_mode = "hybrid"  # "hybrid" atau "scan_clear"
 
         # Game state
         self.current_game: Optional[GameState] = None
@@ -80,9 +85,30 @@ class Driver:
         self._current_region_id: Optional[str] = None
         self._region_loop_detected: bool = False
 
+    def set_strategy_mode(self, mode: str):
+        """Set strategy mode: 'hybrid' atau 'scan_clear'"""
+        if mode in ["hybrid", "scan_clear"]:
+            self.strategy_mode = mode
+            logger.info(f"🔄 Strategy mode changed to: {mode}")
+            if mode == "scan_clear":
+                self.scan_clear.reset()
+                logger.info("📋 Scan & Clear strategy initialized")
+            else:
+                logger.info("🧠 Hybrid AI + RL strategy active")
+        else:
+            logger.warning(f"⚠️ Unknown strategy mode: {mode}, keeping current")
+
+    def get_strategy_name(self) -> str:
+        """Dapatkan nama strategy yang aktif"""
+        return {
+            "hybrid": "🧠 Hybrid AI + RL",
+            "scan_clear": "📋 Scan & Clear"
+        }.get(self.strategy_mode, "❓ Unknown")
+
     async def run(self):
         """Loop utama driver"""
         logger.info("🚀 Driver run() started!")
+        logger.info(f"📋 Active Strategy: {self.get_strategy_name()}")
         self.delay = MIN_RETRY_DELAY
         self.start_time = __import__('time').time()
         logger.info(f"⏰ Start time: {self.start_time}")
@@ -137,6 +163,8 @@ class Driver:
                     logger.info("🔄 Resume target dead, starting new game...")
                     self.current_game = None
                     self._reset_region_tracking()
+                    if self.strategy_mode == "scan_clear":
+                        self.scan_clear.reset()
                     await asyncio.sleep(2)
                     continue
                 elif e.code == 4008:
@@ -152,6 +180,8 @@ class Driver:
                     logger.info("💀 Agent dead (from close code), restarting...")
                     self.current_game = None
                     self._reset_region_tracking()
+                    if self.strategy_mode == "scan_clear":
+                        self.scan_clear.reset()
                     await asyncio.sleep(2)
                     continue
                 else:
@@ -171,6 +201,8 @@ class Driver:
                 self.current_game = None
                 self.strategy.reset_rejection_counter()
                 self._reset_region_tracking()
+                if self.strategy_mode == "scan_clear":
+                    self.scan_clear.reset()
                 # Reset hybrid AI stats
                 self.ai.stats = {
                     "decisions_made": 0,
@@ -262,11 +294,16 @@ class Driver:
     async def _start_game(self, entry_type: str):
         """Mulai game baru - reset semua tracking"""
         logger.info(f"🎮 Joining {entry_type} game...")
+        logger.info(f"📋 Strategy: {self.get_strategy_name()}")
         logger.info(f"🔑 API Key: {self.rest.api_key[:10]}...")
         
         # ===== RESET REGION TRACKING =====
         self._reset_region_tracking()
-        logger.info("🗺️ Region tracking reset for new game")
+        if self.strategy_mode == "scan_clear":
+            self.scan_clear.reset()
+            logger.info("📋 Scan & Clear strategy reset for new game")
+        else:
+            logger.info("🧠 Hybrid AI + RL strategy active")
 
         try:
             # ===== LOAD PACK MODIFIERS =====
@@ -494,10 +531,17 @@ class Driver:
             await self._start_game(entry_type)
 
     async def _play_game(self, ws: WSClient):
-        """Loop gameplay dengan Hybrid AI + RL + Region Tracking"""
-        logger.info("🎮 Starting Hybrid AI-powered gameplay loop...")
-        logger.info("🧠 Hybrid AI = AI Auto-Pilot + Competitive v7 + RL")
-        logger.info("👻 Only detecting OWN death, ignoring other agents")
+        """Loop gameplay dengan strategy yang dipilih"""
+        logger.info("🎮 Starting gameplay loop...")
+        logger.info(f"📋 Active Strategy: {self.get_strategy_name()}")
+        
+        if self.strategy_mode == "scan_clear":
+            logger.info("📋 Scan & Clear mode: Scan all items → Clear enemies → Move next")
+            logger.info(f"📋 Max turns per region: {self.scan_clear.max_turns_per_region}")
+        else:
+            logger.info("🧠 Hybrid AI + RL mode: Adaptive decision making")
+            logger.info("👻 Only detecting OWN death, ignoring other agents")
+        
         logger.info("🗺️ Ruin & Alert monitoring active")
         logger.info("🗺️ Region tracking active - avoiding loops")
 
@@ -539,6 +583,11 @@ class Driver:
                         region_id = region.get("id")
                         if region_id:
                             self._track_region(region_id)
+                            
+                            # Update Scan & Clear region tracking
+                            if self.strategy_mode == "scan_clear":
+                                # Scan & Clear akan update internal state di decide()
+                                pass
 
                 # ===== CEK TIMEOUT =====
                 current_time = __import__('time').time()
@@ -692,20 +741,16 @@ class Driver:
                     action = msg.get("action")
 
                     # ===== RL REWARD TRACKING =====
-                    if action:
+                    if action and self.strategy_mode == "hybrid":
                         action_type = action.get("type", "")
-                        item_id = action.get("itemInstanceId")
-                        
                         if error:
                             self._rl_action_tracking["success"] = False
                             if self.ai and hasattr(self.ai, '_update_rl_reward'):
                                 self.ai._update_rl_reward(self.current_game, action_type, False)
-                            logger.debug(f"❌ RL: Action {action_type} failed")
                         else:
                             self._rl_action_tracking["success"] = True
                             if self.ai and hasattr(self.ai, '_update_rl_reward'):
                                 self.ai._update_rl_reward(self.current_game, action_type, True)
-                            logger.debug(f"✅ RL: Action {action_type} succeeded")
 
                     # Track item jika action adalah pickup
                     if action and action.get("type") == "pickup":
@@ -819,7 +864,7 @@ class Driver:
                 raise
 
     async def _act(self, ws: WSClient, can_act: bool):
-        """Ambil tindakan menggunakan Hybrid AI dengan rate limit protection dan RL"""
+        """Ambil tindakan berdasarkan strategy yang dipilih"""
         if not can_act or not self.current_game or not self.current_game.is_alive:
             return
 
@@ -837,45 +882,74 @@ class Driver:
         self._last_action_time = current_time
 
         try:
-            if self.ai_enabled:
-                decision = await self.ai.decide(self.current_game)
-                strategy_name = self.ai.ai.get_strategy_name() if hasattr(self.ai, 'ai') else "Hybrid"
-
-                if decision.action_type != "wait":
-                    logger.info(
-                        f"🧠 Hybrid AI [{strategy_name}]: {decision.action_type} "
-                        f"(Conf: {decision.confidence:.2f}, "
-                        f"Risk: {decision.risk_score:.2f}, "
-                        f"Value: {decision.expected_value:.2f})"
-                    )
-
-                action = self._build_action_from_decision(decision)
-
+            action = None
+            thought = None
+            
+            # ===== STRATEGY SELECTOR =====
+            if self.strategy_mode == "scan_clear":
+                # ===== SCAN & CLEAR STRATEGY =====
+                decision = self.scan_clear.decide(self.current_game)
+                action = self._execute_scan_clear_decision(decision)
                 if action:
-                    thought = f"Hybrid AI: {decision.reasoning[0] if decision.reasoning else decision.action_type}"
-                    logger.info(f"📤 Sending action: {action}")
-                    
-                    # ===== RL TRACKING: Simpan action yang dikirim =====
-                    self._rl_action_tracking["action"] = decision.action_type
-                    if hasattr(self.ai, 'rl_agent'):
-                        self._rl_action_tracking["state"] = self.ai.rl_agent.get_state_features(self.current_game)
-                    self._rl_action_tracking["timestamp"] = __import__('time').time()
-                    
-                    await ws.send_action(action, thought=thought)
+                    thought = f"Scan & Clear: {decision.get('kind', 'action')}"
+                    logger.info(f"📋 {thought}")
+            
+            else:
+                # ===== HYBRID AI + RL STRATEGY (Default) =====
+                if self.ai_enabled:
+                    decision = await self.ai.decide(self.current_game)
+                    action = self._build_action_from_decision(decision)
+                    if action:
+                        thought = f"Hybrid AI: {decision.reasoning[0] if decision.reasoning else decision.action_type}"
+                        logger.info(f"🧠 {thought}")
 
-                    if decision.action_type != "wait":
-                        if self.knowledge:
-                            self.knowledge.data["stats"]["successful_actions"] += 1
-                            self.knowledge.save()
+            # ===== FALLBACK =====
+            if not action:
+                await self._act_heuristic(ws, can_act)
+                return
 
-                    await asyncio.sleep(ACTION_INTERVAL_SECONDS)
-                    return
+            # ===== SEND ACTION =====
+            logger.info(f"📤 Sending action: {action}")
+            
+            # RL Tracking untuk Hybrid AI
+            if self.strategy_mode == "hybrid" and hasattr(self, 'ai'):
+                self._rl_action_tracking["action"] = decision.action_type
+                if hasattr(self.ai, 'rl_agent'):
+                    self._rl_action_tracking["state"] = self.ai.rl_agent.get_state_features(self.current_game)
+                self._rl_action_tracking["timestamp"] = __import__('time').time()
+            
+            await ws.send_action(action, thought=thought or "Strategy action")
 
-            await self._act_heuristic(ws, can_act)
+            if decision.get("kind") != "wait":
+                if self.knowledge:
+                    self.knowledge.data["stats"]["successful_actions"] += 1
+                    self.knowledge.save()
+
+            await asyncio.sleep(ACTION_INTERVAL_SECONDS)
 
         except Exception as e:
-            logger.error(f"💥 Hybrid AI error: {e}")
+            logger.error(f"💥 Action error: {e}")
             await self._act_heuristic(ws, can_act)
+
+    def _execute_scan_clear_decision(self, decision: Dict) -> Optional[Dict]:
+        """Eksekusi decision dari Scan & Clear"""
+        kind = decision.get("kind")
+        obj = decision.get("obj")
+        
+        if kind == "pickup":
+            return self.scan_clear.action_builder.pickup(obj)
+        elif kind == "attack":
+            return self.scan_clear.action_builder.attack(obj)
+        elif kind == "move":
+            return self.scan_clear.action_builder.move(obj)
+        elif kind == "interact":
+            return self.scan_clear.action_builder.interact(obj)
+        elif kind == "explore":
+            return self.scan_clear.action_builder.explore(obj)
+        elif kind == "wait" or kind == "dead":
+            return None
+        
+        return None
 
     def _build_action_from_decision(self, decision) -> Optional[Dict]:
         """Build action from AI decision"""
@@ -959,42 +1033,58 @@ class Driver:
             await asyncio.sleep(ACTION_INTERVAL_SECONDS)
 
     def _log_hybrid_stats(self):
-        """Log Hybrid AI statistics"""
-        stats = self.ai.get_stats() if hasattr(self.ai, 'get_stats') else {}
-
+        """Log statistics berdasarkan strategy yang aktif"""
         logger.info("=" * 60)
-        logger.info("📊 Hybrid AI Performance Summary")
+        logger.info(f"📊 Performance Summary - {self.get_strategy_name()}")
         logger.info("=" * 60)
-        logger.info(f"   Total Decisions: {stats.get('decisions_made', 0)}")
-        logger.info(f"   AI Decisions: {stats.get('ai_decisions', 0)}")
-        logger.info(f"   Heuristic Decisions: {stats.get('heuristic_decisions', 0)}")
-        logger.info(f"   Survival Priority: {stats.get('survival_priority', 0)}")
-        logger.info(f"   Kill Priority: {stats.get('kill_priority', 0)}")
-        logger.info(f"   Loot Priority: {stats.get('loot_priority', 0)}")
-        logger.info(f"   Explore Priority: {stats.get('explore_priority', 0)}")
+        
+        if self.strategy_mode == "scan_clear":
+            # Scan & Clear stats
+            stats = self.scan_clear.get_stats()
+            logger.info("📋 Scan & Clear Stats:")
+            logger.info(f"   Regions Cleared: {stats.get('regions_cleared', 0)}")
+            logger.info(f"   Items Collected: {stats.get('items_collected', 0)}")
+            logger.info(f"   Enemies Killed: {stats.get('enemies_killed', 0)}")
+            logger.info(f"   Turns Spent: {stats.get('turns_spent', 0)}")
+            logger.info(f"   Total Actions: {stats.get('total_actions', 0)}")
+            logger.info(f"   Regions Visited: {stats.get('regions_visited', 0)}")
+            logger.info(f"   Current Region: {stats.get('current_region', 'None')}")
+        else:
+            # Hybrid AI stats
+            stats = self.ai.get_stats() if hasattr(self.ai, 'get_stats') else {}
+            logger.info("🧠 Hybrid AI Stats:")
+            logger.info(f"   Total Decisions: {stats.get('decisions_made', 0)}")
+            logger.info(f"   AI Decisions: {stats.get('ai_decisions', 0)}")
+            logger.info(f"   Heuristic Decisions: {stats.get('heuristic_decisions', 0)}")
+            logger.info(f"   Survival Priority: {stats.get('survival_priority', 0)}")
+            logger.info(f"   Kill Priority: {stats.get('kill_priority', 0)}")
+            logger.info(f"   Loot Priority: {stats.get('loot_priority', 0)}")
+            logger.info(f"   Explore Priority: {stats.get('explore_priority', 0)}")
+            logger.info(f"   Cache Hit Rate: {stats.get('cache_hit_rate', 0):.1f}%")
+        
+        logger.info("-" * 40)
+        logger.info(f"📊 General Stats:")
         logger.info(f"   Total Actions: {self.total_actions}")
         logger.info(f"   Success Rate: {self.successful_actions / max(self.total_actions, 1) * 100:.1f}%")
+        logger.info(f"   Game Count: {self.game_count}")
         
-        # ===== REGION STATS =====
+        # Region stats
         logger.info("-" * 40)
-        logger.info("🗺️ Region Stats")
+        logger.info("🗺️ Region Stats:")
         logger.info(f"   Visited Regions: {len(self._visited_regions)}")
         logger.info(f"   Region Loop Detected: {self._region_loop_detected}")
         if self._visited_regions:
             logger.info(f"   Last 5 Regions: {list(self._visited_regions)[-5:]}")
         
-        # ===== RL STATS =====
-        if hasattr(self.ai, 'rl_agent'):
+        # RL stats (hanya untuk hybrid)
+        if self.strategy_mode == "hybrid" and hasattr(self.ai, 'rl_agent'):
             rl_stats = self.ai.rl_agent.get_stats()
             logger.info("-" * 40)
-            logger.info("🧠 Reinforcement Learning Stats")
+            logger.info("🧠 Reinforcement Learning Stats:")
             logger.info(f"   Q-Table Size: {rl_stats.get('q_table_size', 0)}")
             logger.info(f"   Memory Size: {rl_stats.get('memory_size', 0)}")
             logger.info(f"   Epsilon: {rl_stats.get('epsilon', 0)}")
-            logger.info(f"   Exploration: {rl_stats.get('exploration_actions', 0)}")
-            logger.info(f"   Exploitation: {rl_stats.get('exploitation_actions', 0)}")
             logger.info(f"   Learning Updates: {rl_stats.get('learning_updates', 0)}")
-            logger.info(f"   Total Reward: {rl_stats.get('total_reward', 0):.2f}")
         
         logger.info("=" * 60)
 
@@ -1007,20 +1097,25 @@ class Driver:
             "game_count": self.game_count,
             "total_actions": self.total_actions,
             "success_rate": self.successful_actions / max(self.total_actions, 1),
-            "hybrid_stats": self.ai.get_stats() if hasattr(self.ai, 'get_stats') else {},
+            "strategy_mode": self.strategy_mode,
+            "strategy_name": self.get_strategy_name(),
             "current_state": self.current_game.entry_type if self.current_game else "none",
             "is_in_game": self.current_game is not None and self.current_game.is_alive
         }
         
-        # ===== REGION STATS =====
+        # Region stats
         result["region_stats"] = {
             "visited_regions": len(self._visited_regions),
             "loop_detected": self._region_loop_detected,
             "regions": list(self._visited_regions)
         }
         
-        # ===== RL STATS =====
-        if hasattr(self.ai, 'rl_agent'):
-            result["rl_stats"] = self.ai.rl_agent.get_stats()
+        # Strategy-specific stats
+        if self.strategy_mode == "scan_clear":
+            result["scan_clear_stats"] = self.scan_clear.get_stats()
+        else:
+            result["hybrid_stats"] = self.ai.get_stats() if hasattr(self.ai, 'get_stats') else {}
+            if hasattr(self.ai, 'rl_agent'):
+                result["rl_stats"] = self.ai.rl_agent.get_stats()
         
         return result
