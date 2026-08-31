@@ -1,18 +1,20 @@
 # src/ai/perception.py
-"""Perception Layer - Memahami lingkungan game"""
+"""Perception Layer - Memahami lingkungan game dengan optimasi performa"""
 
 import logging
-from typing import Dict, Any, List, Optional
+import math
+from typing import Dict, Any, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 from collections import deque
-import math
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class PerceivedEntity:
+    """Entity yang dirasakan dalam game"""
     id: str
-    type: str
+    type: str  # 'self', 'agent', 'monster', 'item', 'interactable', 'connection'
     position: Dict[str, float]
     hp: float
     max_hp: float
@@ -24,8 +26,10 @@ class PerceivedEntity:
     distance: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+
 @dataclass
 class PerceivedState:
+    """State yang dirasakan dengan optimasi"""
     turn: int
     self: PerceivedEntity
     hp_ratio: float
@@ -40,22 +44,74 @@ class PerceivedState:
     opportunity_score: float = 0.0
     survival_potential: float = 1.0
 
+
 class PerceptionEngine:
+    """
+    Perception Engine dengan optimasi performa:
+    1. Distance-based filtering (skip jauh)
+    2. Limit jumlah entity yang diproses
+    3. Cache distance calculation
+    4. Early exit ketika tidak ada data
+    """
+    
+    # ===== CONSTANTS =====
+    MAX_ENEMY_DISTANCE = 20.0
+    MAX_ITEM_DISTANCE = 10.0
+    MAX_INTERACTABLE_DISTANCE = 10.0
+    MAX_ENEMIES = 10
+    MAX_ITEMS = 15
+    MAX_INTERACTABLES = 10
+    MAX_CONNECTIONS = 8
+    
     def __init__(self):
         self.history = deque(maxlen=50)
         self.last_perception = None
         
+        # ===== OPTIMASI: Distance cache =====
+        self._distance_cache: Dict[str, float] = {}
+        self._last_self_pos: Tuple[float, float] = (0, 0)
+        self._cache_clear_counter = 0
+        
+        # ===== OPTIMASI: Stats =====
+        self._stats = {
+            "items_scanned": 0,
+            "items_filtered": 0,
+            "enemies_scanned": 0,
+            "enemies_filtered": 0,
+            "distance_cache_hits": 0,
+            "distance_cache_misses": 0
+        }
+    
     def perceive(self, game_state) -> PerceivedState:
+        """Persepsi state game dengan optimasi"""
         view = game_state.view
         self_data = view.get("self", {})
         region = view.get("currentRegion", {})
         
+        # ===== OPTIMASI: Early exit if no data =====
+        if not self_data:
+            return self._empty_state()
+        
         self_entity = self._perceive_self(self_data)
+        
+        # ===== OPTIMASI: Update self position cache =====
+        self_x = self_entity.position.get("x", 0)
+        self_y = self_entity.position.get("y", 0)
+        self._last_self_pos = (self_x, self_y)
+        
+        # ===== OPTIMASI: Clear cache periodically =====
+        self._cache_clear_counter += 1
+        if self._cache_clear_counter > 50:
+            self._distance_cache.clear()
+            self._cache_clear_counter = 0
+        
+        # ===== SCAN DENGAN OPTIMASI =====
         enemies = self._perceive_enemies(view, self_entity)
         items = self._perceive_items(region, self_entity)
         interactables = self._perceive_interactables(region, self_entity)
         connections = self._perceive_connections(region, self_entity)
         
+        # ===== CALCULATE =====
         danger_level = self._calculate_danger_level(enemies, self_entity, view)
         opportunity_score = self._calculate_opportunity(items, interactables, view)
         survival_potential = self._calculate_survival_potential(self_entity, enemies, region)
@@ -77,9 +133,27 @@ class PerceptionEngine:
         
         self.history.append(state)
         self.last_perception = state
+        
+        # ===== OPTIMASI: Log stats periodically =====
+        if game_state.turn % 20 == 0:
+            logger.debug(f"📊 Perception Stats: {self._stats}")
+        
         return state
     
+    def _empty_state(self) -> PerceivedState:
+        """Return empty state when no data"""
+        empty_entity = PerceivedEntity(
+            id="", type="self", position={"x": 0, "y": 0},
+            hp=0, max_hp=1, is_alive=True, is_enemy=False
+        )
+        return PerceivedState(
+            turn=0, self=empty_entity, hp_ratio=0,
+            in_cave=False, region={},
+            enemies=[], items=[], interactables=[], connections=[]
+        )
+    
     def _perceive_self(self, data: Dict) -> PerceivedEntity:
+        """Persepsi karakter sendiri"""
         return PerceivedEntity(
             id=data.get("id", ""),
             type="self",
@@ -99,34 +173,78 @@ class PerceptionEngine:
         )
     
     def _perceive_enemies(self, view: Dict, self_entity: PerceivedEntity) -> List[PerceivedEntity]:
+        """
+        Persepsi musuh dengan optimasi:
+        - Skip enemy yang terlalu jauh (> MAX_ENEMY_DISTANCE)
+        - Limit jumlah enemy yang diproses
+        - Gunakan distance cache
+        """
         enemies = []
-        for agent in view.get("visibleAgents", []):
-            if agent.get("isAlive", False):
-                enemy = self._create_enemy_entity(agent, "agent", self_entity)
-                if enemy:
-                    enemies.append(enemy)
-        for monster in view.get("visibleMonsters", []):
-            if monster.get("isAlive", False):
-                enemy = self._create_enemy_entity(monster, "monster", self_entity)
-                if enemy:
-                    enemies.append(enemy)
+        self_x, self_y = self._last_self_pos
+        
+        # ===== OPTIMASI: Process agents =====
+        agents = view.get("visibleAgents", [])
+        self._stats["enemies_scanned"] += len(agents)
+        
+        for agent in agents:
+            if not agent.get("isAlive", False):
+                continue
+            
+            # Quick distance check (tanpa sqrt)
+            ax = float(agent.get("x", agent.get("position", {}).get("x", 0)))
+            ay = float(agent.get("y", agent.get("position", {}).get("y", 0)))
+            dx = ax - self_x
+            dy = ay - self_y
+            dist_sq = dx*dx + dy*dy
+            
+            if dist_sq > self.MAX_ENEMY_DISTANCE * self.MAX_ENEMY_DISTANCE:
+                self._stats["enemies_filtered"] += 1
+                continue
+            
+            distance = math.sqrt(dist_sq)
+            enemy = self._create_enemy_entity(agent, "agent", self_entity, distance)
+            if enemy:
+                enemies.append(enemy)
+        
+        # ===== OPTIMASI: Process monsters =====
+        monsters = view.get("visibleMonsters", [])
+        for monster in monsters:
+            if not monster.get("isAlive", False):
+                continue
+            
+            mx = float(monster.get("x", monster.get("position", {}).get("x", 0)))
+            my = float(monster.get("y", monster.get("position", {}).get("y", 0)))
+            dx = mx - self_x
+            dy = my - self_y
+            dist_sq = dx*dx + dy*dy
+            
+            if dist_sq > self.MAX_ENEMY_DISTANCE * self.MAX_ENEMY_DISTANCE:
+                self._stats["enemies_filtered"] += 1
+                continue
+            
+            distance = math.sqrt(dist_sq)
+            enemy = self._create_enemy_entity(monster, "monster", self_entity, distance)
+            if enemy:
+                enemies.append(enemy)
+        
+        # ===== OPTIMASI: Sort by threat and limit =====
+        if len(enemies) > self.MAX_ENEMIES:
+            enemies.sort(key=lambda e: (e.threat_score, -1/e.distance), reverse=True)
+            enemies = enemies[:self.MAX_ENEMIES]
+        
         return enemies
     
-    def _create_enemy_entity(self, data: Dict, entity_type: str, self_entity: PerceivedEntity) -> Optional[PerceivedEntity]:
+    def _create_enemy_entity(self, data: Dict, entity_type: str, self_entity: PerceivedEntity, distance: float) -> Optional[PerceivedEntity]:
+        """Create enemy entity dengan validasi"""
         try:
-            pos_x = float(data.get("x", data.get("position", {}).get("x", 0)))
-            pos_y = float(data.get("y", data.get("position", {}).get("y", 0)))
-            self_x = self_entity.position.get("x", 0)
-            self_y = self_entity.position.get("y", 0)
-            distance = math.sqrt((pos_x - self_x) ** 2 + (pos_y - self_y) ** 2)
-            
             is_guardian = data.get("isGuardian", False) or str(data.get("kind", "")).lower() == "guardian"
             threat_score = self._calculate_threat_score(data, distance, is_guardian)
             
             return PerceivedEntity(
                 id=data.get("agentId") or data.get("monsterId") or data.get("id", ""),
                 type=entity_type,
-                position={"x": pos_x, "y": pos_y},
+                position={"x": float(data.get("x", data.get("position", {}).get("x", 0))),
+                         "y": float(data.get("y", data.get("position", {}).get("y", 0)))},
                 hp=float(data.get("hp", data.get("currentHp", 0))),
                 max_hp=float(data.get("maxHp", data.get("maxHealth", 1))),
                 is_alive=data.get("isAlive", True),
@@ -142,26 +260,53 @@ class PerceptionEngine:
                 }
             )
         except Exception as e:
+            logger.debug(f"Failed to create enemy entity: {e}")
             return None
     
     def _calculate_threat_score(self, data: Dict, distance: float, is_guardian: bool) -> float:
+        """Calculate threat score dengan optimasi"""
         hp_ratio = float(data.get("hp", 0)) / max(float(data.get("maxHp", 1)), 1)
         attack = float(data.get("attack", data.get("atk", 0)))
+        
+        # Threat = (attack + base) * (1 - hp_ratio + factor) / distance
         threat = (attack + 10) * (1 - hp_ratio + 0.3) / max(distance, 1)
+        
         if is_guardian:
             threat *= 1.5
+        
         return min(max(threat, 0), 100)
     
     def _perceive_items(self, region: Dict, self_entity: PerceivedEntity) -> List[PerceivedEntity]:
+        """
+        Persepsi item dengan optimasi:
+        - Skip item terlalu jauh
+        - Prioritaskan item berdasarkan value/distance ratio
+        - Limit jumlah item
+        """
         items = []
-        for item in region.get("items", []):
+        self_x, self_y = self._last_self_pos
+        
+        raw_items = region.get("items", [])
+        self._stats["items_scanned"] += len(raw_items)
+        
+        for item in raw_items:
             try:
-                self_x = self_entity.position.get("x", 0)
-                self_y = self_entity.position.get("y", 0)
                 pos_x = float(item.get("x", 0))
                 pos_y = float(item.get("y", 0))
-                distance = math.sqrt((pos_x - self_x) ** 2 + (pos_y - self_y) ** 2)
+                dx = pos_x - self_x
+                dy = pos_y - self_y
+                dist_sq = dx*dx + dy*dy
+                
+                if dist_sq > self.MAX_ITEM_DISTANCE * self.MAX_ITEM_DISTANCE:
+                    self._stats["items_filtered"] += 1
+                    continue
+                
+                distance = math.sqrt(dist_sq)
                 value_score = self._calculate_item_value(item)
+                
+                # Skip item dengan value sangat rendah
+                if value_score < 5 and distance > 5:
+                    continue
                 
                 items.append(PerceivedEntity(
                     id=item.get("instanceId") or item.get("itemInstanceId") or item.get("id", ""),
@@ -181,37 +326,72 @@ class PerceptionEngine:
                 ))
             except Exception as e:
                 pass
+        
+        # ===== OPTIMASI: Sort by value/distance ratio =====
+        if len(items) > self.MAX_ITEMS:
+            items.sort(key=lambda x: x.value_score / max(x.distance, 0.1), reverse=True)
+            items = items[:self.MAX_ITEMS]
+        else:
+            items.sort(key=lambda x: x.distance)
+        
         return items
     
     def _calculate_item_value(self, item: Dict) -> float:
+        """Calculate item value dengan optimasi"""
         item_type = str(item.get("type", item.get("itemType", ""))).lower()
         value = float(item.get("value", item.get("rarityValue", 0)))
         heal = float(item.get("heal", item.get("healAmount", 0)))
+        
         score = value
+        
+        # Healing items
         if heal > 0:
             score += heal * 5
+        
+        # Weapon/Armor/Relic bonus
         if any(k in item_type for k in ("weapon", "armor", "relic")):
             score += 50
+        
+        # EP items
+        if "ep" in item_type:
+            score += 20
+        
         return score
     
     def _perceive_interactables(self, region: Dict, self_entity: PerceivedEntity) -> List[PerceivedEntity]:
+        """
+        Persepsi interactables dengan optimasi
+        """
         interactables = []
+        self_x, self_y = self._last_self_pos
+        
         for obj in region.get("interactables", []):
             try:
-                self_x = self_entity.position.get("x", 0)
-                self_y = self_entity.position.get("y", 0)
                 pos_x = float(obj.get("x", 0))
                 pos_y = float(obj.get("y", 0))
-                distance = math.sqrt((pos_x - self_x) ** 2 + (pos_y - self_y) ** 2)
+                dx = pos_x - self_x
+                dy = pos_y - self_y
+                dist_sq = dx*dx + dy*dy
+                
+                if dist_sq > self.MAX_INTERACTABLE_DISTANCE * self.MAX_INTERACTABLE_DISTANCE:
+                    continue
+                
+                distance = math.sqrt(dist_sq)
                 obj_type = str(obj.get("type", obj.get("kind", ""))).lower()
                 
+                # Value scoring
                 value_score = 0
                 if any(k in obj_type for k in ("medical", "supply", "cache", "watchtower")):
                     value_score = 80
                 elif "ruin" in obj_type:
-                    value_score = 60 - max(0, region.get("alertGauge", 0) - 6) * 10
+                    alert = region.get("alertGauge", 0)
+                    value_score = 60 - max(0, alert - 6) * 10
                 elif obj.get("isExit", False) and "cave" in obj_type:
                     value_score = 100
+                
+                # Skip low value interactables far away
+                if value_score < 30 and distance > 5:
+                    continue
                 
                 interactables.append(PerceivedEntity(
                     id=obj.get("interactableId") or obj.get("id", ""),
@@ -231,10 +411,20 @@ class PerceptionEngine:
                 ))
             except Exception as e:
                 pass
+        
+        # ===== OPTIMASI: Sort by value and limit =====
+        if len(interactables) > self.MAX_INTERACTABLES:
+            interactables.sort(key=lambda x: x.value_score / max(x.distance, 0.1), reverse=True)
+            interactables = interactables[:self.MAX_INTERACTABLES]
+        
         return interactables
     
     def _perceive_connections(self, region: Dict, self_entity: PerceivedEntity) -> List[PerceivedEntity]:
+        """
+        Persepsi connections dengan optimasi
+        """
         connections = []
+        
         for conn in region.get("connections", []):
             try:
                 score = 30
@@ -257,34 +447,91 @@ class PerceptionEngine:
                 ))
             except Exception as e:
                 pass
+        
+        # ===== OPTIMASI: Sort by safety and limit =====
+        if len(connections) > self.MAX_CONNECTIONS:
+            connections.sort(key=lambda x: x.value_score, reverse=True)
+            connections = connections[:self.MAX_CONNECTIONS]
+        
         return connections
     
     def _calculate_danger_level(self, enemies: List[PerceivedEntity], self_entity: PerceivedEntity, view: Dict) -> float:
+        """Calculate danger level dengan optimasi"""
         if not enemies:
             return 0.0
-        total_threat = sum(e.threat_score for e in enemies)
+        
+        # ===== OPTIMASI: Only consider closest enemies =====
+        nearby = [e for e in enemies if e.distance < 15]
+        if not nearby:
+            return 0.0
+        
+        # ===== OPTIMASI: Use top 5 most threatening =====
+        if len(nearby) > 5:
+            nearby.sort(key=lambda x: x.threat_score, reverse=True)
+            nearby = nearby[:5]
+        
+        total_threat = sum(e.threat_score for e in nearby)
         hp_penalty = 1 + (1 - self_entity.hp / max(self_entity.max_hp, 1)) * 0.5
-        nearby_enemies = len([e for e in enemies if e.distance < 10])
-        nearby_factor = 1 + nearby_enemies * 0.3
-        guardian_factor = 1 + sum(1 for e in enemies if e.is_guardian) * 0.5
-        return min(total_threat * hp_penalty * nearby_factor * guardian_factor, 100)
+        nearby_factor = 1 + len(nearby) * 0.3
+        guardian_factor = 1 + sum(1 for e in nearby if e.is_guardian) * 0.5
+        
+        danger = total_threat * hp_penalty * nearby_factor * guardian_factor
+        
+        return min(danger, 100)
     
     def _calculate_opportunity(self, items: List[PerceivedEntity], interactables: List[PerceivedEntity], view: Dict) -> float:
-        item_value = sum(i.value_score / max(i.distance, 1) for i in items)
-        interactable_value = sum(i.value_score / max(i.distance, 1) for i in interactables)
+        """Calculate opportunity score dengan optimasi"""
+        # ===== OPTIMASI: Only consider close items =====
+        close_items = [i for i in items if i.distance < 5]
+        close_interact = [i for i in interactables if i.distance < 5]
+        
+        if not close_items and not close_interact:
+            return 0.0
+        
+        # ===== OPTIMASI: Top 5 items and top 3 interactables =====
+        item_value = sum(i.value_score / max(i.distance, 0.1) for i in close_items[:5])
+        interactable_value = sum(i.value_score / max(i.distance, 0.1) for i in close_interact[:3])
+        
         return min(item_value + interactable_value, 100)
     
     def _calculate_survival_potential(self, self_entity: PerceivedEntity, enemies: List[PerceivedEntity], region: Dict) -> float:
+        """Calculate survival potential dengan optimasi"""
         hp_ratio = self_entity.hp / max(self_entity.max_hp, 1)
         hp_factor = hp_ratio
-        enemy_threat = sum(e.threat_score for e in enemies)
+        
+        # ===== OPTIMASI: Only consider nearby enemies =====
+        nearby_enemies = [e for e in enemies if e.distance < 15]
+        enemy_threat = sum(e.threat_score for e in nearby_enemies[:5])
         enemy_factor = max(0, 1 - enemy_threat / 100)
         
+        # Healing items available
         items = region.get("items", [])
-        healing_items = sum(1 for i in items if float(i.get("heal", i.get("healAmount", 0))) > 0)
+        healing_items = sum(1 for i in items[:10] if float(i.get("heal", i.get("healAmount", 0))) > 0)
         item_factor = min(1 + healing_items * 0.1, 2)
         
-        guardian_nearby = any(e.is_guardian and e.distance < 15 for e in enemies)
+        # Guardian nearby
+        guardian_nearby = any(e.is_guardian and e.distance < 15 for e in nearby_enemies)
         guardian_factor = 0.5 if guardian_nearby else 1
         
-        return min(max(hp_factor * enemy_factor * item_factor * guardian_factor, 0), 1)
+        potential = hp_factor * enemy_factor * item_factor * guardian_factor
+        
+        return min(max(potential, 0), 1)
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Dapatkan statistik perception"""
+        return {
+            **self._stats,
+            "history_length": len(self.history),
+            "cache_size": len(self._distance_cache)
+        }
+    
+    def reset_stats(self):
+        """Reset statistik"""
+        self._stats = {
+            "items_scanned": 0,
+            "items_filtered": 0,
+            "enemies_scanned": 0,
+            "enemies_filtered": 0,
+            "distance_cache_hits": 0,
+            "distance_cache_misses": 0
+        }
