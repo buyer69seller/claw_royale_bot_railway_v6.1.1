@@ -1,10 +1,10 @@
 # src/lifecycle/driver.py
-"""Driver utama dengan Hybrid AI (AI Auto-Pilot + Competitive v7) + RL + Region Tracking + Strategy Selector"""
+"""Driver utama dengan Hybrid AI (AI Auto-Pilot + Competitive v7) + RL + Region Tracking"""
 
 import asyncio
 import logging
 import json
-from typing import Optional, Dict, Any, Set
+from typing import Optional, Dict, Any, Set, List
 
 from websockets.exceptions import ConnectionClosed
 
@@ -13,7 +13,6 @@ from ..client.ws_client import WSClient
 from ..game.state import GameState
 from ..game.actions import ActionBuilder
 from ..strategy.engine import StrategyEngine
-from ..strategy.scan_clear import ScanClearStrategy
 from .router import StateRouter
 from .version_manager import VersionManager
 from ..core.exceptions import (
@@ -36,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class Driver:
-    """Driver utama bot dengan Hybrid AI + RL + Region Tracking + Strategy Selector"""
+    """Driver utama bot dengan Hybrid AI + RL + Region Tracking"""
 
     def __init__(self, rest_client: RestClient):
         self.rest = rest_client
@@ -48,13 +47,8 @@ class Driver:
         self.knowledge: Optional[KnowledgeBase] = None
         self.auth_service = None
 
-        # Strategy Engine (heuristic fallback)
+        # Fallback strategy (heuristic)
         self.strategy = StrategyEngine()
-        
-        # Scan & Clear Strategy
-        self.scan_clear = ScanClearStrategy()
-        self.strategy_mode = "hybrid"  # "hybrid" or "scan_clear"
-        
         self._pack_modifiers_loaded = False
 
         # Game state
@@ -86,20 +80,10 @@ class Driver:
         self._current_region_id: Optional[str] = None
         self._region_loop_detected: bool = False
         
-        # ===== STUCK TRACKING =====
-        self._stuck_counter = 0
-        self._last_hp = 0
-        self._last_turn = 0
-
-    def set_strategy_mode(self, mode: str):
-        """Set strategy mode: 'hybrid' atau 'scan_clear'"""
-        if mode in ["hybrid", "scan_clear"]:
-            self.strategy_mode = mode
-            if mode == "scan_clear":
-                self.scan_clear.reset()
-            logger.info(f"🔄 Strategy mode changed to: {mode}")
-        else:
-            logger.warning(f"⚠️ Unknown strategy mode: {mode}, keeping current")
+        # ===== HYBRID STRATEGY STATE =====
+        self._strategy_mode = "balanced"  # balanced, aggressive, defensive, explore
+        self._strategy_switch_timer = 0
+        self._last_strategy_switch = 0
 
     async def run(self):
         """Loop utama driver"""
@@ -192,8 +176,6 @@ class Driver:
                 self.current_game = None
                 self.strategy.reset_rejection_counter()
                 self._reset_region_tracking()
-                if self.strategy_mode == "scan_clear":
-                    self.scan_clear.reset()
                 # Reset hybrid AI stats
                 self.ai.stats = {
                     "decisions_made": 0,
@@ -207,6 +189,7 @@ class Driver:
                 self._stuck_counter = 0
                 self._last_hp = 0
                 self._last_turn = 0
+                self._strategy_mode = "balanced"
                 await asyncio.sleep(1)
                 self.delay = MIN_RETRY_DELAY
                 logger.info("🔄 Force rejoining new game...")
@@ -231,6 +214,8 @@ class Driver:
                 await asyncio.sleep(self.delay)
                 self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
 
+    # ===== REGION TRACKING METHODS =====
+    
     def _reset_region_tracking(self):
         """Reset region tracking untuk game baru"""
         self._visited_regions.clear()
@@ -256,6 +241,83 @@ class Driver:
         else:
             self._region_loop_detected = False
 
+    def _is_region_visited(self, region_id: str) -> bool:
+        """Cek apakah region sudah dikunjungi"""
+        return region_id in self._visited_regions
+
+    def _get_region_visit_count(self, region_id: str) -> int:
+        """Dapatkan jumlah kunjungan ke region"""
+        return self._region_visit_count.get(region_id, 0)
+
+    # ===== HYBRID STRATEGY METHODS =====
+    
+    def _update_strategy_mode(self, state: GameState):
+        """Update strategy mode berdasarkan kondisi game"""
+        hp_ratio = state.hp_ratio()
+        enemies = state.get_enemies()
+        items = state.get_valid_items()
+        
+        # Defensive: HP rendah atau banyak musuh
+        if hp_ratio < 0.3:
+            self._strategy_mode = "defensive"
+            logger.debug(f"🛡️ Strategy: Defensive (HP: {hp_ratio:.0%})")
+        # Aggressive: HP tinggi dan sedikit musuh
+        elif hp_ratio > 0.7 and len(enemies) < 2 and len(items) > 0:
+            self._strategy_mode = "aggressive"
+            logger.debug(f"⚔️ Strategy: Aggressive (HP: {hp_ratio:.0%}, Enemies: {len(enemies)})")
+        # Explore: HP bagus dan ada ruin
+        elif hp_ratio > 0.6:
+            for obj in state.get_interactables():
+                if "ruin" in str(obj.get("type", obj.get("kind", ""))).lower():
+                    self._strategy_mode = "explore"
+                    logger.debug(f"🔍 Strategy: Explore (HP: {hp_ratio:.0%})")
+                    return
+            self._strategy_mode = "balanced"
+        else:
+            self._strategy_mode = "balanced"
+            logger.debug(f"⚖️ Strategy: Balanced (HP: {hp_ratio:.0%})")
+
+    def _get_strategy_priority(self) -> Dict[str, float]:
+        """Dapatkan priority weights berdasarkan strategy mode"""
+        if self._strategy_mode == "defensive":
+            return {
+                "survival": 2.0,
+                "heal": 1.8,
+                "loot": 0.8,
+                "kill": 0.5,
+                "explore": 0.3,
+                "move": 0.6
+            }
+        elif self._strategy_mode == "aggressive":
+            return {
+                "survival": 0.8,
+                "heal": 0.6,
+                "loot": 1.2,
+                "kill": 2.0,
+                "explore": 0.8,
+                "move": 0.5
+            }
+        elif self._strategy_mode == "explore":
+            return {
+                "survival": 1.0,
+                "heal": 0.8,
+                "loot": 1.0,
+                "kill": 0.6,
+                "explore": 2.0,
+                "move": 1.2
+            }
+        else:  # balanced
+            return {
+                "survival": 1.0,
+                "heal": 1.0,
+                "loot": 1.0,
+                "kill": 1.0,
+                "explore": 1.0,
+                "move": 1.0
+            }
+
+    # ===== LOAD PACK MODIFIERS =====
+    
     async def _load_pack_modifiers(self):
         """Load pack modifiers dari loadout untuk strategy"""
         try:
@@ -282,6 +344,8 @@ class Driver:
             self._pack_modifiers_loaded = False
             return False
 
+    # ===== GAME MANAGEMENT =====
+    
     async def _start_game(self, entry_type: str):
         """Mulai game baru - reset semua tracking"""
         logger.info(f"🎮 Joining {entry_type} game...")
@@ -289,8 +353,7 @@ class Driver:
         
         # ===== RESET REGION TRACKING =====
         self._reset_region_tracking()
-        if self.strategy_mode == "scan_clear":
-            self.scan_clear.reset()
+        self._strategy_mode = "balanced"
         logger.info("🗺️ Region tracking reset for new game")
 
         try:
@@ -388,6 +451,7 @@ class Driver:
         """Resume game yang sedang berjalan"""
         logger.info(f"🔄 Resuming {entry_type} game...")
         
+        # ===== LOAD PACK MODIFIERS =====
         try:
             await self._load_pack_modifiers()
         except Exception as e:
@@ -406,6 +470,7 @@ class Driver:
         """REJOIN: Kembali ke game yang sedang berjalan"""
         logger.info(f"🔄 Attempting to REJOIN {entry_type} game...")
         
+        # ===== LOAD PACK MODIFIERS =====
         try:
             await self._load_pack_modifiers()
         except Exception as e:
@@ -428,6 +493,7 @@ class Driver:
             
             logger.info(f"✅ Found live game: {live_game.get('gameId')}")
             
+            # Rejoin via WebSocket
             if not self.auth_service:
                 from ..services.auth_service import AuthService
                 self.auth_service = AuthService(self.rest)
@@ -504,22 +570,24 @@ class Driver:
             logger.info("🔄 Falling back to new game...")
             await self._start_game(entry_type)
 
+    # ===== GAMEPLAY LOOP =====
+    
     async def _play_game(self, ws: WSClient):
-        """Loop gameplay dengan Strategy Selector"""
-        logger.info("🎮 Starting gameplay loop...")
-        logger.info(f"🧠 Strategy Mode: {self.strategy_mode.upper()}")
-        if self.strategy_mode == "scan_clear":
-            logger.info("📋 Scan & Clear: Collect all items, clear all enemies")
-        else:
-            logger.info("🤖 Hybrid AI: Adaptive + RL decision making")
+        """Loop gameplay dengan Hybrid AI + RL + Region Tracking + Hybrid Strategy"""
+        logger.info("🎮 Starting Hybrid AI-powered gameplay loop...")
+        logger.info("🧠 Hybrid AI = AI Auto-Pilot + Competitive v7 + RL")
         logger.info("👻 Only detecting OWN death, ignoring other agents")
         logger.info("🗺️ Region tracking active - avoiding loops")
+        logger.info("⚖️ Hybrid Strategy: Adaptive mode switching")
 
         # Timeout tracking
         last_action_time = __import__('time').time()
         no_action_timeout = 120
         last_view_time = __import__('time').time()
         view_timeout = 90
+        stuck_counter = 0
+        last_hp = 0
+        last_turn = 0
         
         # Heartbeat tracking
         last_ping_time = __import__('time').time()
@@ -527,9 +595,8 @@ class Driver:
 
         while True:
             try:
+                # ===== HEARTBEAT / PING =====
                 current_time = __import__('time').time()
-                
-                # Heartbeat / Ping
                 if current_time - last_ping_time > ping_interval:
                     try:
                         await ws.send({"type": "ping"})
@@ -542,9 +609,9 @@ class Driver:
                 msg_type = msg.get("type")
 
                 if msg_type in ("agent_view", "turn_advanced", "action_sync"):
-                    last_view_time = current_time
+                    last_view_time = __import__('time').time()
                     
-                    # Track region
+                    # ===== TRACK REGION =====
                     if msg_type == "agent_view":
                         view = msg.get("view", {})
                         region = view.get("currentRegion", {})
@@ -552,12 +619,14 @@ class Driver:
                         if region_id:
                             self._track_region(region_id)
 
-                # Check timeout
+                # ===== CEK TIMEOUT =====
+                current_time = __import__('time').time()
                 if current_time - last_view_time > view_timeout:
                     logger.warning(f"⏰ No view for {view_timeout}s, attempting REJOIN...")
                     try:
                         if self.current_game:
-                            await self._rejoin_game(self.current_game.entry_type)
+                            entry_type = self.current_game.entry_type
+                            await self._rejoin_game(entry_type)
                             return
                         else:
                             await self._start_game("free")
@@ -589,7 +658,7 @@ class Driver:
                             "kills": self.current_game.kills,
                             "survival_time": self.current_game.survival_time
                         })
-                    self._log_stats()
+                    self._log_hybrid_stats()
                     break
 
                 if msg_type == "game_ended":
@@ -601,7 +670,7 @@ class Driver:
                             "kills": self.current_game.kills,
                             "survival_time": self.current_game.survival_time
                         })
-                    self._log_stats()
+                    self._log_hybrid_stats()
                     break
 
                 # ===== CAN_ACT =====
@@ -637,10 +706,14 @@ class Driver:
                                 })
                             raise AgentDeadError("Agent HP is 0")
 
-                        if self._last_hp == self.current_game.hp and self._last_turn == self.current_game.turn:
-                            self._stuck_counter += 1
-                            if self._stuck_counter > 10:
-                                logger.warning(f"⚠️ Game stuck for {self._stuck_counter} turns, attempting rejoin...")
+                        # ===== UPDATE HYBRID STRATEGY =====
+                        self._update_strategy_mode(self.current_game)
+                        strategy_priority = self._get_strategy_priority()
+
+                        if last_hp == self.current_game.hp and last_turn == self.current_game.turn:
+                            stuck_counter += 1
+                            if stuck_counter > 10:
+                                logger.warning(f"⚠️ Game stuck for {stuck_counter} turns, attempting rejoin...")
                                 try:
                                     await self._rejoin_game(self.current_game.entry_type)
                                     return
@@ -648,12 +721,12 @@ class Driver:
                                     logger.error(f"❌ Rejoin on stuck failed: {e}")
                                     raise AgentDeadError("Game stuck - rejoin failed")
                         else:
-                            self._stuck_counter = 0
-                        self._last_hp = self.current_game.hp
-                        self._last_turn = self.current_game.turn
+                            stuck_counter = 0
+                        last_hp = self.current_game.hp
+                        last_turn = self.current_game.turn
 
                         can_act = msg.get("canAct", self.current_game.can_act)
-                        await self._act(ws, can_act)
+                        await self._act(ws, can_act, strategy_priority)
 
                         if can_act:
                             last_action_time = current_time
@@ -692,7 +765,7 @@ class Driver:
                             raise AgentDeadError("Agent dead (from action_rejected)")
                     self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
                     if view and self.current_game.is_alive:
-                        await self._act(ws, self.current_game.can_act)
+                        await self._act(ws, self.current_game.can_act, self._get_strategy_priority())
                     continue
 
                 # ===== ACTION_RESULT =====
@@ -701,29 +774,32 @@ class Driver:
                     error = msg.get("error")
                     action = msg.get("action")
 
-                    # RL Reward Tracking
+                    # ===== RL REWARD TRACKING =====
                     if action:
                         action_type = action.get("type", "")
                         if error:
                             self._rl_action_tracking["success"] = False
                             if self.ai and hasattr(self.ai, '_update_rl_reward'):
                                 self.ai._update_rl_reward(self.current_game, action_type, False)
+                            logger.debug(f"❌ RL: Action {action_type} failed")
                         else:
                             self._rl_action_tracking["success"] = True
                             if self.ai and hasattr(self.ai, '_update_rl_reward'):
                                 self.ai._update_rl_reward(self.current_game, action_type, True)
+                            logger.debug(f"✅ RL: Action {action_type} succeeded")
 
-                    # Track item pickup
+                    # Track item jika action adalah pickup
                     if action and action.get("type") == "pickup":
                         item_id = action.get("itemInstanceId")
                         if error:
                             if item_id:
                                 self.current_game.mark_item_attempted(item_id)
                                 self.current_game.mark_item_collected(item_id)
+                                logger.debug(f"❌ Pickup failed for {item_id[:8]}, marked as collected")
                         else:
                             if item_id:
                                 self.current_game.mark_item_collected(item_id)
-                                logger.info(f"✅ Pickup success for {item_id[:8]}")
+                                logger.info(f"✅ Pickup success for {item_id[:8]}, marked as collected")
 
                     if error:
                         code = error.get("code")
@@ -740,7 +816,7 @@ class Driver:
                                 self.current_game.update_view(view, "action_result")
                                 if not self.current_game.is_alive:
                                     raise AgentDeadError("Agent dead from action_result view")
-                                await self._act(ws, self.current_game.can_act)
+                                await self._act(ws, self.current_game.can_act, self._get_strategy_priority())
                             continue
 
                         if code == "ACTION_FAILED":
@@ -750,7 +826,7 @@ class Driver:
                                 self.current_game.update_view(view, "action_result")
                                 if not self.current_game.is_alive:
                                     raise AgentDeadError("Agent dead from action_result view")
-                                await self._act(ws, self.current_game.can_act)
+                                await self._act(ws, self.current_game.can_act, self._get_strategy_priority())
                             continue
 
                     if msg.get("action"):
@@ -794,6 +870,8 @@ class Driver:
                         
                         if alert_active:
                             logger.warning(f"⚠️⚠️ ALERT ACTIVE! Gauge: {alert_gauge}/10 ⚠️⚠️")
+                            if self.current_game and self.current_game.can_act:
+                                logger.info("🛡️ Alert active - focusing on survival!")
                         else:
                             if alert_gauge > 5:
                                 logger.info(f"⚡ Alert gauge: {alert_gauge}/10 (moderate)")
@@ -821,234 +899,12 @@ class Driver:
                 logger.exception(f"💥 Gameplay error: {e}")
                 raise
 
-    async def _act(self, ws: WSClient, can_act: bool):
-        """Ambil tindakan berdasarkan strategy yang dipilih"""
+    # ===== ACTION EXECUTION =====
+    
+    async def _act(self, ws: WSClient, can_act: bool, priority: Dict[str, float] = None):
+        """Ambil tindakan menggunakan Hybrid AI dengan priority dan region tracking"""
         if not can_act or not self.current_game or not self.current_game.is_alive:
             return
 
-        # Rate limit protection
-        current_time = __import__('time').time()
-        min_action_interval = 0.5
-        
-        if self._last_action_time > 0:
-            elapsed = current_time - self._last_action_time
-            if elapsed < min_action_interval:
-                wait_time = min_action_interval - elapsed
-                await asyncio.sleep(wait_time)
-        
-        self._last_action_time = current_time
-
-        try:
-            # ===== STRATEGY SELECTOR =====
-            if self.strategy_mode == "scan_clear":
-                # Scan & Clear Strategy
-                decision = self.scan_clear.decide(self.current_game)
-                action = self._execute_scan_clear_decision(decision)
-                if action:
-                    thought = f"Scan & Clear: {decision.get('kind', 'action')}"
-                    logger.info(f"📋 {thought}")
-                    await ws.send_action(action, thought=thought)
-                    await asyncio.sleep(ACTION_INTERVAL_SECONDS)
-                    return
-            else:
-                # Hybrid AI (default)
-                if self.ai_enabled:
-                    decision = await self.ai.decide(self.current_game)
-                    action = self._build_action_from_decision(decision)
-                    if action:
-                        thought = f"Hybrid AI: {decision.reasoning[0] if decision.reasoning else decision.action_type}"
-                        logger.info(f"🧠 {thought}")
-                        await ws.send_action(action, thought=thought)
-                        
-                        # RL tracking
-                        if decision.action_type != "wait":
-                            self._rl_action_tracking["action"] = decision.action_type
-                            if hasattr(self.ai, 'rl_agent'):
-                                self._rl_action_tracking["state"] = self.ai.rl_agent.get_state_features(self.current_game)
-                            self._rl_action_tracking["timestamp"] = current_time
-                            
-                            if self.knowledge:
-                                self.knowledge.data["stats"]["successful_actions"] += 1
-                                self.knowledge.save()
-                        
-                        await asyncio.sleep(ACTION_INTERVAL_SECONDS)
-                        return
-
-            # Fallback
-            await self._act_heuristic(ws, can_act)
-
-        except Exception as e:
-            logger.error(f"💥 Action error: {e}")
-            await self._act_heuristic(ws, can_act)
-
-    def _execute_scan_clear_decision(self, decision: Dict) -> Optional[Dict]:
-        """Eksekusi decision dari Scan & Clear"""
-        kind = decision.get("kind")
-        obj = decision.get("obj")
-        
-        if kind == "pickup":
-            return self.scan_clear.action_builder.pickup(obj)
-        elif kind == "attack":
-            return self.scan_clear.action_builder.attack(obj)
-        elif kind == "move":
-            return self.scan_clear.action_builder.move(obj)
-        elif kind == "interact":
-            return self.scan_clear.action_builder.interact(obj)
-        elif kind == "explore":
-            return self.scan_clear.action_builder.explore(obj)
-        elif kind == "wait":
-            return None
-        
-        return None
-
-    def _build_action_from_decision(self, decision) -> Optional[Dict]:
-        """Build action from AI decision"""
-        action_type = decision.action_type
-        target_id = decision.target_id
-
-        if action_type == "attack":
-            target = self._find_target(target_id, "enemies")
-            if target:
-                return ActionBuilder.attack(target)
-
-        elif action_type == "pickup":
-            item = self._find_target(target_id, "items")
-            if item:
-                return ActionBuilder.pickup(item)
-
-        elif action_type == "interact":
-            obj = self._find_target(target_id, "interactables")
-            if obj:
-                return ActionBuilder.interact(obj)
-
-        elif action_type == "explore":
-            obj = self._find_target(target_id, "interactables")
-            if obj:
-                return ActionBuilder.explore(obj)
-
-        elif action_type == "move":
-            conn = self._find_target(target_id, "connections")
-            if conn:
-                return ActionBuilder.move(conn)
-        
-        elif action_type == "use":
-            item = self._find_target(target_id, "items")
-            if item:
-                return ActionBuilder.use_item(item)
-            if target_id:
-                return ActionBuilder.use_item_by_id(target_id)
-
-        return None
-
-    def _find_target(self, target_id: str, category: str) -> Optional[Dict]:
-        """Cari target berdasarkan ID dan kategori"""
-        if not self.current_game:
-            return None
-
-        if category == "enemies":
-            for enemy in self.current_game.get_enemies():
-                if enemy.get("id") == target_id or enemy.get("agentId") == target_id:
-                    return enemy
-
-        elif category == "items":
-            for item in self.current_game.get_items():
-                if item.get("id") == target_id or item.get("instanceId") == target_id:
-                    return item
-
-        elif category == "interactables":
-            for obj in self.current_game.get_interactables():
-                if obj.get("id") == target_id or obj.get("interactableId") == target_id:
-                    return obj
-
-        elif category == "connections":
-            for conn in self.current_game.get_connections():
-                if conn.get("id") == target_id or conn.get("regionId") == target_id:
-                    return conn
-
-        return None
-
-    async def _act_heuristic(self, ws: WSClient, can_act: bool):
-        """Fallback: heuristic strategy (v7)"""
-        if not can_act or not self.current_game:
-            return
-
-        decision = self.strategy.decide(self.current_game)
-        action = self.strategy.execute(self.current_game, decision)
-
-        if action:
-            thought = f"Heuristic (v7): {decision.get('kind', 'action')}"
-            await ws.send_action(action, thought=thought)
-            await asyncio.sleep(ACTION_INTERVAL_SECONDS)
-
-    def _log_stats(self):
-        """Log semua stats"""
-        stats = self.ai.get_stats() if hasattr(self.ai, 'get_stats') else {}
-
-        logger.info("=" * 60)
-        logger.info("📊 Performance Summary")
-        logger.info("=" * 60)
-        logger.info(f"   Strategy Mode: {self.strategy_mode.upper()}")
-        logger.info(f"   Total Decisions: {stats.get('decisions_made', 0)}")
-        logger.info(f"   AI Decisions: {stats.get('ai_decisions', 0)}")
-        logger.info(f"   Heuristic Decisions: {stats.get('heuristic_decisions', 0)}")
-        logger.info(f"   Total Actions: {self.total_actions}")
-        logger.info(f"   Success Rate: {self.successful_actions / max(self.total_actions, 1) * 100:.1f}%")
-        
-        # Region stats
-        logger.info("-" * 40)
-        logger.info("🗺️ Region Stats")
-        logger.info(f"   Visited Regions: {len(self._visited_regions)}")
-        logger.info(f"   Region Loop Detected: {self._region_loop_detected}")
-        
-        # Scan & Clear stats
-        if self.strategy_mode == "scan_clear":
-            sc_stats = self.scan_clear.get_stats()
-            logger.info("-" * 40)
-            logger.info("📋 Scan & Clear Stats")
-            logger.info(f"   Regions Cleared: {sc_stats.get('regions_cleared', 0)}")
-            logger.info(f"   Items Collected: {sc_stats.get('items_collected', 0)}")
-            logger.info(f"   Enemies Killed: {sc_stats.get('enemies_killed', 0)}")
-        
-        # RL stats
-        if hasattr(self.ai, 'rl_agent'):
-            rl_stats = self.ai.rl_agent.get_stats()
-            logger.info("-" * 40)
-            logger.info("🧠 Reinforcement Learning Stats")
-            logger.info(f"   Q-Table Size: {rl_stats.get('q_table_size', 0)}")
-            logger.info(f"   Memory Size: {rl_stats.get('memory_size', 0)}")
-            logger.info(f"   Epsilon: {rl_stats.get('epsilon', 0)}")
-        
-        logger.info("=" * 60)
-
-    def get_performance(self) -> Dict[str, Any]:
-        """Dapatkan performa bot"""
-        uptime = int(__import__('time').time() - (self.start_time or 0))
-
-        result = {
-            "uptime": uptime,
-            "game_count": self.game_count,
-            "total_actions": self.total_actions,
-            "success_rate": self.successful_actions / max(self.total_actions, 1),
-            "strategy_mode": self.strategy_mode,
-            "is_in_game": self.current_game is not None and self.current_game.is_alive
-        }
-        
-        # Region stats
-        result["region_stats"] = {
-            "visited_regions": len(self._visited_regions),
-            "loop_detected": self._region_loop_detected
-        }
-        
-        # Hybrid stats
-        if hasattr(self.ai, 'get_stats'):
-            result["hybrid_stats"] = self.ai.get_stats()
-        
-        # RL stats
-        if hasattr(self.ai, 'rl_agent'):
-            result["rl_stats"] = self.ai.rl_agent.get_stats()
-        
-        # Scan & Clear stats
-        if self.strategy_mode == "scan_clear":
-            result["scan_clear_stats"] = self.scan_clear.get_stats()
-        
-        return result
+        # ===== RATE LIMIT PROTECTION =====
+        current_time
