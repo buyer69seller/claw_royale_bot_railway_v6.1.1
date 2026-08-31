@@ -1,5 +1,5 @@
 # src/game/state.py
-"""Manajemen state game - dengan Item Tracking"""
+"""Manajemen state game - dengan Item Tracking, Ruin & Alert Tracking"""
 
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List, Set
@@ -41,52 +41,24 @@ class GameState:
     # Rejected action tracking
     rejected_count: int = 0
     last_rejected_action: Optional[str] = None
-    # src/game/state.py - tambahkan di GameState
-
-    # ===== INVENTORY TRACKING (BARU) =====
-    inventory_items: Dict[str, Dict] = field(default_factory=dict)  # Item yang dimiliki
-    equipped_items: Dict[str, str] = field(default_factory=dict)   # slot -> item_id
     
-    def add_to_inventory(self, item: Dict):
-        """Tambahkan item ke inventory"""
-        item_id = item.get("instanceId") or item.get("id")
-        if item_id:
-            self.inventory_items[item_id] = item
-            logger.debug(f"📦 Added to inventory: {item_id[:8]}")
-    
-    def remove_from_inventory(self, item_id: str):
-        """Hapus item dari inventory"""
-        if item_id in self.inventory_items:
-            del self.inventory_items[item_id]
-            logger.debug(f"🗑️ Removed from inventory: {item_id[:8]}")
-    
-    def get_healing_items_inventory(self) -> List[Dict]:
-        """Dapatkan item healing dari inventory"""
-        healing_items = []
-        for item in self.inventory_items.values():
-            heal = float(item.get("heal", item.get("healAmount", 0)))
-            if heal > 0:
-                healing_items.append(item)
-        return healing_items
-    
-    def get_best_healing_item(self) -> Optional[Dict]:
-        """Dapatkan item healing terbaik dari inventory"""
-        items = self.get_healing_items_inventory()
-        if not items:
-            return None
-        # Sort by heal amount (terbesar dulu)
-        items.sort(key=lambda x: float(x.get("heal", x.get("healAmount", 0))), reverse=True)
-        return items[0]
-    
-    def has_healing_items(self) -> bool:
-        """Cek apakah ada item healing di inventory"""
-        return len(self.get_healing_items_inventory()) > 0
-        
-    # ===== ITEM TRACKING (BARU) =====
+    # ===== ITEM TRACKING =====
     attempted_items: Set[str] = field(default_factory=set)
     collected_items: Set[str] = field(default_factory=set)
     item_cache: Dict[str, Dict] = field(default_factory=dict)
     last_item_scan_turn: int = 0
+    
+    # ===== INVENTORY TRACKING =====
+    inventory_items: Dict[str, Dict] = field(default_factory=dict)
+    equipped_items: Dict[str, str] = field(default_factory=dict)
+    
+    # ===== RUIN & ALERT TRACKING (BARU) =====
+    alert_gauge: int = 0
+    alert_active: bool = False
+    ruin_cache: Dict[str, Dict] = field(default_factory=dict)
+    explored_ruins: Set[str] = field(default_factory=set)
+    ruin_explore_count: int = 0
+    last_ruin_explore_turn: int = 0
     
     def update_view(self, view_data: Dict, reason: str = "sync"):
         """Update view dari game - dengan item cache update"""
@@ -124,11 +96,20 @@ class GameState:
         
         # ===== ITEM CACHE UPDATE =====
         self._update_item_cache(view_data)
+        
+        # ===== RUIN CACHE UPDATE (BARU) =====
+        self._update_ruin_cache(view_data)
     
     def _update_item_cache(self, view_data: Dict):
         """Update item cache dari view"""
         region = view_data.get("currentRegion", {})
         items = region.get("items", [])
+        
+        # Reset cache jika view baru (game baru)
+        if self.turn == 1:
+            self.item_cache.clear()
+            self.attempted_items.clear()
+            self.collected_items.clear()
         
         # Update cache dengan item baru
         current_item_ids = set()
@@ -138,12 +119,14 @@ class GameState:
                 current_item_ids.add(item_id)
                 if item_id not in self.item_cache or self.item_cache.get(item_id) != item:
                     self.item_cache[item_id] = item
+                    logger.debug(f"📦 Item cached: {item_id[:8]} - {item.get('type', 'unknown')}")
         
         # Hapus item yang sudah tidak ada di view
         removed_items = []
         for cached_id in list(self.item_cache.keys()):
             if cached_id not in current_item_ids:
-                self.collected_items.add(cached_id)
+                if cached_id not in self.collected_items:
+                    self.collected_items.add(cached_id)
                 removed_items.append(cached_id)
                 del self.item_cache[cached_id]
         
@@ -153,16 +136,36 @@ class GameState:
         # Bersihkan attempted_items yang sudah dikoleksi
         self.attempted_items = self.attempted_items - self.collected_items
     
+    def _update_ruin_cache(self, view_data: Dict):
+        """Update ruin cache dari view (BARU)"""
+        region = view_data.get("currentRegion", {})
+        interactables = region.get("interactables", [])
+        
+        for obj in interactables:
+            obj_type = str(obj.get("type", obj.get("kind", ""))).lower()
+            if "ruin" in obj_type:
+                ruin_id = obj.get("id") or obj.get("interactableId")
+                if ruin_id:
+                    # Update cache
+                    self.ruin_cache[ruin_id] = {
+                        "id": ruin_id,
+                        "gauge": obj.get("gauge", 0),
+                        "maxGauge": obj.get("maxGauge", 3),
+                        "occupiedBy": obj.get("occupiedBy"),
+                        "isEmpty": obj.get("isEmpty", False),
+                        "contentType": obj.get("contentType", "unknown"),
+                        "position": {"x": obj.get("x", 0), "y": obj.get("y", 0)}
+                    }
+                    
+                    # Jika ruin kosong, tandai sudah diexplore
+                    if obj.get("isEmpty", False):
+                        self.explored_ruins.add(ruin_id)
+                        logger.debug(f"🗺️ Ruin {ruin_id[:8]} cleared")
+    
     # ===== ITEM VALIDATION METHODS =====
     
     def get_valid_items(self) -> List[Dict]:
-        """
-        Dapatkan item yang VALID dan BELUM DICOBA
-        - Item dalam jangkauan (distance < 5)
-        - Item belum dicoba/dikoleksi
-        - Item masih ada di cache
-        - Item masih ada di view
-        """
+        """Dapatkan item yang VALID dan BELUM DICOBA"""
         items = self.get_items()
         valid_items = []
         me = self.get_self()
@@ -171,12 +174,16 @@ class GameState:
             logger.debug("📭 No items in current view")
             return []
         
+        logger.debug(f"📦 Total items in view: {len(items)}")
+        
         for item in items:
             item_id = item.get("instanceId") or item.get("id")
             if not item_id:
                 continue
             
-            # Skip jika sudah dicoba atau sudah dikoleksi
+            item_type = item.get("type", item.get("itemType", "unknown"))
+            logger.debug(f"🔍 Found item: {item_id[:8]} - {item_type}")
+            
             if item_id in self.attempted_items:
                 logger.debug(f"⏭️ Item {item_id[:8]} already attempted")
                 continue
@@ -185,40 +192,46 @@ class GameState:
                 logger.debug(f"⏭️ Item {item_id[:8]} already collected")
                 continue
             
-            # Cek jarak
             distance = self._calculate_distance(me, item)
             
-            # Hanya ambil item dalam jangkauan (distance < 5)
             if distance < 5:
                 valid_items.append(item)
                 logger.debug(f"✅ Item {item_id[:8]} valid (distance: {distance:.1f})")
             else:
                 logger.debug(f"📏 Item {item_id[:8]} too far (distance: {distance:.1f})")
         
+        logger.debug(f"📦 Valid items: {len(valid_items)}")
         return valid_items
     
-    def get_healing_items(self, hp_threshold: float = 0.4) -> List[Dict]:
-        """Dapatkan item healing yang valid"""
-        valid_items = self.get_valid_items()
-        healing_items = []
+    def get_nearby_items(self, max_distance: float = 3.0) -> List[Dict]:
+        """Dapatkan semua item dalam jarak tertentu"""
+        items = self.get_items()
+        nearby = []
+        me = self.get_self()
         
-        for item in valid_items:
+        for item in items:
+            item_id = item.get("instanceId") or item.get("id")
+            if not item_id:
+                continue
+            
+            distance = self._calculate_distance(me, item)
+            if distance <= max_distance:
+                nearby.append(item)
+                logger.debug(f"📦 Nearby item: {item_id[:8]} - {distance:.1f}m")
+        
+        return nearby
+    
+    def get_healing_items(self) -> List[Dict]:
+        """Dapatkan item healing dari ground"""
+        items = []
+        for item in self.get_items():
             heal = float(item.get("heal", item.get("healAmount", 0)))
             if heal > 0:
-                me = self.get_self()
-                distance = self._calculate_distance(me, item)
-                healing_items.append({
-                    "item": item,
-                    "heal": heal,
-                    "distance": distance,
-                    "score": heal / max(distance, 1)
-                })
-        
-        healing_items.sort(key=lambda x: x["score"], reverse=True)
-        return [h["item"] for h in healing_items]
+                items.append(item)
+        return items
     
     def get_loot_items(self) -> List[Dict]:
-        """Dapatkan item loot yang valid (non-healing)"""
+        """Dapatkan item loot (non-healing)"""
         valid_items = self.get_valid_items()
         loot_items = []
         
@@ -289,7 +302,155 @@ class GameState:
             "valid_items_available": len(self.get_valid_items())
         }
     
-    # ===== EXISTING METHODS (TIDAK DIUBAH) =====
+    # ===== INVENTORY METHODS =====
+    
+    def add_to_inventory(self, item: Dict):
+        """Tambahkan item ke inventory"""
+        item_id = item.get("instanceId") or item.get("id")
+        if item_id:
+            self.inventory_items[item_id] = item
+            logger.debug(f"📦 Added to inventory: {item_id[:8]}")
+    
+    def remove_from_inventory(self, item_id: str):
+        """Hapus item dari inventory"""
+        if item_id in self.inventory_items:
+            del self.inventory_items[item_id]
+            logger.debug(f"🗑️ Removed from inventory: {item_id[:8]}")
+    
+    def get_healing_items_inventory(self) -> List[Dict]:
+        """Dapatkan item healing dari inventory"""
+        healing_items = []
+        for item in self.inventory_items.values():
+            heal = float(item.get("heal", item.get("healAmount", 0)))
+            if heal > 0:
+                healing_items.append(item)
+        return healing_items
+    
+    def get_best_healing_item(self) -> Optional[Dict]:
+        """Dapatkan item healing terbaik dari inventory"""
+        items = self.get_healing_items_inventory()
+        if not items:
+            return None
+        items.sort(key=lambda x: float(x.get("heal", x.get("healAmount", 0))), reverse=True)
+        return items[0]
+    
+    def has_healing_items(self) -> bool:
+        """Cek apakah ada item healing di inventory"""
+        return len(self.get_healing_items_inventory()) > 0
+    
+    # ===== RUIN & ALERT METHODS (BARU) =====
+    
+    def update_ruin_state(self, ruin_data: Dict):
+        """Update ruin state dari event"""
+        ruin_id = ruin_data.get("ruinId")
+        if not ruin_id:
+            return
+        
+        self.ruin_cache[ruin_id] = {
+            "id": ruin_id,
+            "gauge": ruin_data.get("gauge", 0),
+            "maxGauge": ruin_data.get("maxGauge", 3),
+            "occupiedBy": ruin_data.get("occupiedBy"),
+            "isEmpty": ruin_data.get("isEmpty", False),
+            "contentType": ruin_data.get("contentType", "unknown")
+        }
+        
+        # Jika ruin kosong, tandai sudah diexplore
+        if ruin_data.get("isEmpty", False):
+            self.explored_ruins.add(ruin_id)
+            logger.debug(f"🗺️ Ruin {ruin_id[:8]} cleared")
+    
+    def update_alert_gauge(self, alert_data: Dict):
+        """Update alert gauge dari event"""
+        self.alert_gauge = alert_data.get("alertGauge", 0)
+        self.alert_active = alert_data.get("alertActive", False)
+        
+        if self.alert_active:
+            logger.warning(f"⚠️ ALERT ACTIVE! Gauge: {self.alert_gauge}")
+        else:
+            logger.debug(f"📊 Alert gauge: {self.alert_gauge}")
+    
+    def get_available_ruins(self) -> List[Dict]:
+        """Dapatkan ruins yang tersedia (tidak kosong dan tidak dioccupied)"""
+        available = []
+        for ruin_id, ruin in self.ruin_cache.items():
+            if not ruin.get("isEmpty", True) and not ruin.get("occupiedBy"):
+                available.append(ruin)
+        return available
+    
+    def get_best_ruin_to_explore(self) -> Optional[Dict]:
+        """Dapatkan ruin terbaik untuk diexplore"""
+        available = self.get_available_ruins()
+        
+        if not available:
+            return None
+        
+        # Prioritaskan relic ruins
+        relic_ruins = [r for r in available if r.get("contentType") == "relic"]
+        pack_ruins = [r for r in available if r.get("contentType") == "pack"]
+        
+        # Urutkan berdasarkan gauge (yang sudah tinggi lebih baik)
+        relic_ruins.sort(key=lambda r: r.get("gauge", 0), reverse=True)
+        pack_ruins.sort(key=lambda r: r.get("gauge", 0), reverse=True)
+        
+        # Prioritaskan relic ruins
+        if relic_ruins:
+            logger.debug(f"🗺️ Best ruin: {relic_ruins[0].get('id', 'unknown')[:8]} (relic, gauge: {relic_ruins[0].get('gauge', 0)}/3)")
+            return relic_ruins[0]
+        elif pack_ruins:
+            logger.debug(f"🗺️ Best ruin: {pack_ruins[0].get('id', 'unknown')[:8]} (pack, gauge: {pack_ruins[0].get('gauge', 0)}/3)")
+            return pack_ruins[0]
+        
+        return None
+    
+    def can_explore_ruin(self) -> bool:
+        """Cek apakah aman untuk explore (alert < 8)"""
+        safe = self.alert_gauge < 8
+        if not safe:
+            logger.warning(f"⚠️ Cannot explore: alert gauge too high ({self.alert_gauge})")
+        return safe
+    
+    def can_explore_more(self) -> bool:
+        """Cek apakah masih bisa explore tanpa trigger alert"""
+        # Explore +2, jika gauge + 2 >= 10 maka akan trigger alert
+        return self.alert_gauge + 2 < 10
+    
+    def get_ruin_explore_count(self, ruin_id: str) -> int:
+        """Dapatkan jumlah explore yang sudah dilakukan di ruin"""
+        ruin = self.ruin_cache.get(ruin_id, {})
+        return ruin.get("gauge", 0)
+    
+    def get_ruin_by_id(self, ruin_id: str) -> Optional[Dict]:
+        """Dapatkan ruin berdasarkan ID"""
+        return self.ruin_cache.get(ruin_id)
+    
+    def get_ruin_position(self, ruin_id: str) -> Dict[str, float]:
+        """Dapatkan posisi ruin"""
+        ruin = self.ruin_cache.get(ruin_id, {})
+        return ruin.get("position", {"x": 0, "y": 0})
+    
+    def get_ruin_content_type(self, ruin_id: str) -> str:
+        """Dapatkan tipe konten ruin"""
+        ruin = self.ruin_cache.get(ruin_id, {})
+        return ruin.get("contentType", "unknown")
+    
+    def get_ruin_status(self) -> Dict[str, Any]:
+        """Dapatkan status semua ruin"""
+        total = len(self.ruin_cache)
+        explored = len(self.explored_ruins)
+        available = len(self.get_available_ruins())
+        
+        return {
+            "total_ruins": total,
+            "explored_ruins": explored,
+            "available_ruins": available,
+            "relic_ruins": len([r for r in self.ruin_cache.values() if r.get("contentType") == "relic"]),
+            "pack_ruins": len([r for r in self.ruin_cache.values() if r.get("contentType") == "pack"]),
+            "alert_gauge": self.alert_gauge,
+            "alert_active": self.alert_active
+        }
+    
+    # ===== EXISTING METHODS =====
     
     def mark_dead(self):
         """Tandai agent sudah mati"""
