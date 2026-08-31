@@ -153,7 +153,26 @@ class HybridAIEngine:
             my_atk = float(me.get("attack", me.get("atk", 0)))
             my_def = float(me.get("defense", me.get("def", 0)))
             hp_ratio = my_hp / max(my_max_hp, 1)
-            
+
+        # ===== GUARDIAN AVOIDANCE (BARU) =====
+        # Deteksi guardian dan tambahkan penalti
+        guardian_nearby = False
+        guardian_distance = 999.0
+        
+        for enemy in enemies:
+            if enemy.get("isGuardian", False) or str(enemy.get("kind", "")).lower() == "guardian":
+                guardian_nearby = True
+                dist = self._distance(me, enemy)
+                if dist < guardian_distance:
+                    guardian_distance = dist
+                logger.debug(f"🛡️ Guardian detected at distance: {dist:.1f}")
+        
+        if guardian_nearby and guardian_distance < 15:
+            # Guardian dekat, tingkatkan risk
+            threat["risk_score"] += 0.3 * (1 - guardian_distance / 15)
+            threat["should_flee"] = True
+            threat["should_fight"] = False
+            logger.info(f"🛡️ Guardian nearby ({guardian_distance:.1f}m) - fleeing!")
             # Enemy assessment
             enemies = state.get_enemies()
             if enemies:
@@ -474,35 +493,34 @@ class HybridAIEngine:
                 except Exception as e:
                     logger.debug(f"Kill decision error: {e}")
             
-            # === PRIORITY 4: EXPLORE ===
-            
-            try:
-                for obj in state.get_interactables():
-                    if not isinstance(obj, dict):
-                        continue
+# === PRIORITY 4: EXPLORE (DENGAN RUIN FARMING) ===
+        
+        # ===== RUIN FARMING (BARU) =====
+        # Prioritaskan ruin jika HP > 60% dan alert rendah
+        if hp_ratio > 0.6 and alert < 6:
+            for obj in state.get_interactables():
+                if not isinstance(obj, dict):
+                    continue
+                obj_type = str(obj.get("type", obj.get("kind", ""))).lower()
+                if "ruin" in obj_type:
                     distance = self._distance(state.get_self(), obj)
-                    if distance < 2 and "ruin" in str(obj.get("type", obj.get("kind", ""))):
+                    if distance < 3:  # Dekat dengan ruin
                         self.stats["explore_priority"] += 1
                         return PriorityDecision(
                             priority=4,
                             action_type="explore",
                             target_id=obj.get("interactableId") or obj.get("id"),
-                            reasoning="Exploring ruin",
-                            confidence=0.75
+                            reasoning=f"Farming ruin (distance: {distance:.1f})",
+                            confidence=0.8
                         )
-                
-                for obj in state.get_interactables():
-                    if not isinstance(obj, dict):
-                        continue
-                    distance = self._distance(state.get_self(), obj)
-                    if distance < 5 and "ruin" in str(obj.get("type", obj.get("kind", ""))):
+                    elif distance < 8:  # Ruin dalam jangkauan
                         self.stats["explore_priority"] += 1
                         return PriorityDecision(
                             priority=4,
                             action_type="move",
                             target_id=obj.get("regionId"),
                             reasoning="Moving to ruin",
-                            confidence=0.6
+                            confidence=0.65
                         )
             except Exception as e:
                 logger.debug(f"Explore error: {e}")
