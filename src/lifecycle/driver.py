@@ -458,6 +458,26 @@ class Driver:
         logger.info("👻 Only detecting OWN death, ignoring other agents")
         logger.info("🗺️ Ruin & Alert monitoring active")
 
+
+        # ===== HEARTBEAT / PING =====
+        last_ping_time = __import__('time').time()
+        ping_interval = 30  # 30 detik
+
+        while True:
+            try:
+                # Kirim ping jika diperlukan
+                current_time = __import__('time').time()
+                if current_time - last_ping_time > ping_interval:
+                    try:
+                        await ws.send({"type": "ping"})
+                        last_ping_time = current_time
+                        logger.debug("📤 Sent ping")
+                    except Exception as e:
+                        logger.debug(f"Ping failed: {e}")
+                
+                msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
+                # ... rest of code ...
+
         # Timeout tracking
         last_action_time = __import__('time').time()
         no_action_timeout = 120
