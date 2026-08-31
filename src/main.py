@@ -16,7 +16,7 @@ from .core.config import API_KEY
 from .utils.logger import setup_logging
 from .services.reward_service import RewardService
 from .services.loadout_service import LoadoutService
-from .services.inventory_service import InventoryService  # <-- TAMBAHKAN
+from .services.inventory_service import InventoryService
 from .utils.health import HealthServer
 from .ai.knowledge import KnowledgeBase
 from .core.constants import ensure_directories
@@ -76,8 +76,18 @@ async def main():
     logger.info("🦀 Starting Claw Royale Bot v6.1 - Hybrid AI")
     logger.info("=" * 60)
 
-    # Init Knowledge Base
+    # Init Knowledge Base dengan cleanup
     knowledge = KnowledgeBase()
+    
+    # ===== CLEANUP OLD DATA (BARU) =====
+    try:
+        removed = knowledge.clear_old_data(days=30)
+        if removed > 0:
+            logger.info(f"🧹 Cleaned {removed} old knowledge entries (>30 days)")
+    except Exception as e:
+        logger.debug(f"Knowledge cleanup skipped: {e}")
+    
+    # Get insights dengan memory info
     insights = knowledge.get_insights()
     logger.info(f"📊 AI Knowledge:")
     logger.info(f"   - Win Rate: {insights['performance']['win_rate']*100:.1f}%")
@@ -85,6 +95,10 @@ async def main():
     logger.info(f"   - Kills/Game: {insights['performance']['kills_per_game']:.1f}")
     logger.info(f"   - Success Rate: {insights['performance']['success_rate']*100:.1f}%")
     logger.info(f"   - Total Games: {insights['total_games']}")
+    
+    # ===== TAMBAHKAN: Memory info =====
+    if "memory" in insights:
+        logger.info(f"   - Memory Usage: {insights['memory']['usage_percent']:.1f}% ({insights['memory']['history_entries']}/{insights['memory']['max_history']} entries)")
     logger.info("=" * 60)
 
     # Setup health check server
@@ -130,7 +144,7 @@ async def main():
         except Exception as e:
             logger.debug(f"Loadout optimization skipped: {e}")
 
-        # ===== AUTO-EQUIP BEST ITEMS (BARU) =====
+        # Auto-equip best items
         try:
             inventory_service = InventoryService(rest)
             logger.info("🔧 Auto-equipping best items...")
