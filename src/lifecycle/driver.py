@@ -26,8 +26,7 @@ from ..core.constants import (
     MAX_RETRY_DELAY,
     RETRY_BACKOFF_MULTIPLIER,
     JOIN_WS,
-    ACTION_INTERVAL_SECONDS,
-    AUTO_EQUIP_INTERVAL_GAMES
+    ACTION_INTERVAL_SECONDS
 )
 from ..ai.hybrid_engine import HybridAIEngine
 from ..ai.knowledge import KnowledgeBase
@@ -61,11 +60,6 @@ class Driver:
         self.start_time = None
         self.total_actions = 0
         self.successful_actions = 0
-
-        # Auto-equip tracking
-        self.games_since_equip = 0
-        self.auto_equip_interval = AUTO_EQUIP_INTERVAL_GAMES  # Check every N games
-        self.last_equip_result = None
 
     async def run(self):
         """Loop utama driver"""
@@ -143,8 +137,13 @@ class Driver:
                     "loot_priority": 0,
                     "explore_priority": 0
                 }
+                self._stuck_counter = 0
+                self._last_hp = 0
+                self._last_turn = 0
                 await asyncio.sleep(1)
                 self.delay = MIN_RETRY_DELAY
+                logger.info("🔄 Force rejoining new game...")
+                continue
 
             except NotSelectedError:
                 logger.info("❌ Not selected, retrying...")
@@ -165,41 +164,12 @@ class Driver:
                 await asyncio.sleep(self.delay)
                 self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
 
-    async def _auto_equip_if_needed(self):
-        """Auto-equip items periodically"""
-        try:
-            self.games_since_equip += 1
-            
-            # Check if it's time to auto-equip
-            if self.games_since_equip >= self.auto_equip_interval:
-                self.games_since_equip = 0
-                
-                logger.info("🔧 Running periodic auto-equip...")
-                from ..services.loadout_service import LoadoutService
-                loadout_service = LoadoutService(self.rest)
-                
-                result = await loadout_service.auto_equip_best_items()
-                self.last_equip_result = result
-                
-                if result.get("changes"):
-                    logger.info(f"✅ Periodically equipped: {', '.join(result['changes'])}")
-                elif result.get("error"):
-                    logger.warning(f"⚠️ Auto-equip error: {result.get('error')}")
-                else:
-                    logger.info("✅ Loadout already optimal")
-                    
-        except Exception as e:
-            logger.debug(f"Periodic auto-equip skipped: {e}")
-
     async def _start_game(self, entry_type: str):
         """Mulai game baru - via WebSocket dengan Hybrid AI"""
         logger.info(f"🎮 Joining {entry_type} game...")
         logger.info(f"🔑 API Key: {self.rest.api_key[:10]}...")
 
         try:
-            # Run auto-equip before joining game
-            await self._auto_equip_if_needed()
-
             if not self.auth_service:
                 from ..services.auth_service import AuthService
                 self.auth_service = AuthService(self.rest)
@@ -296,7 +266,236 @@ class Driver:
             logger.info(f"{entry_type} resume target dead, re-dialing...")
             raise
 
- logger.exception(f"💥 Gameplay error: {e}")
+    async def _play_game(self, ws: WSClient):
+        """Loop gameplay dengan Hybrid AI - dengan timeout detection"""
+        logger.info("🎮 Starting Hybrid AI-powered gameplay loop...")
+        logger.info("🧠 Hybrid AI = AI Auto-Pilot + Competitive v7")
+        logger.info("👻 Only detecting OWN death, ignoring other agents")
+
+        # Timeout tracking
+        last_action_time = __import__('time').time()
+        no_action_timeout = 60
+        last_view_time = __import__('time').time()
+        view_timeout = 45
+        stuck_counter = 0
+        last_hp = 0
+        last_turn = 0
+
+        while True:
+            try:
+                msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
+                msg_type = msg.get("type")
+
+                # Update last view time
+                if msg_type in ("agent_view", "turn_advanced", "action_sync"):
+                    last_view_time = __import__('time').time()
+
+                # ===== CEK TIMEOUT =====
+                current_time = __import__('time').time()
+                if current_time - last_view_time > view_timeout:
+                    logger.warning(f"⏰ No view for {view_timeout}s, forcing restart...")
+                    raise AgentDeadError("View timeout - forcing restart")
+
+                # ===== HANYA DETEKSI KEMATIAN DIRI SENDIRI =====
+                if msg_type == "agent_died":
+                    if msg.get("meta", {}).get("youDied") is True:
+                        self.current_game.mark_dead()
+                        if self.knowledge:
+                            self.knowledge.record_outcome("death", {
+                                "kills": self.current_game.kills,
+                                "survival_time": self.current_game.survival_time
+                            })
+                        logger.info(f"💀 YOU DIED! Survival: {self.current_game.survival_time}, Kills: {self.current_game.kills}")
+                        logger.info("🔄 Restarting and joining new game...")
+                        raise AgentDeadError("You died!")
+                    continue
+
+                # ===== GAME SELESAI =====
+                if msg_type == "game_settled":
+                    self.current_game.mark_finished()
+                    winners = msg.get("winners", [])
+                    logger.info(f"🏆 Game settled! Winners: {len(winners)}")
+                    if self.knowledge:
+                        self.knowledge.record_outcome("win", {
+                            "kills": self.current_game.kills,
+                            "survival_time": self.current_game.survival_time
+                        })
+                    self._log_hybrid_stats()
+                    logger.info("🔄 Exiting gameplay loop...")
+                    break
+
+                if msg_type == "game_ended":
+                    self.current_game.mark_finished()
+                    placement = msg.get("placement")
+                    logger.info(f"🏆 Game ended! Placement: {placement}")
+                    if self.knowledge and placement and placement <= 5:
+                        self.knowledge.record_outcome("win", {
+                            "kills": self.current_game.kills,
+                            "survival_time": self.current_game.survival_time
+                        })
+                    self._log_hybrid_stats()
+                    logger.info("🔄 Exiting gameplay loop...")
+                    break
+
+                # ===== CAN_ACT =====
+                if msg_type == "can_act_changed":
+                    self.current_game.can_act = bool(msg.get("canAct"))
+                    if self.current_game.can_act:
+                        last_action_time = current_time
+                    continue
+
+                # ===== AGENT_VIEW / TURN_ADVANCED =====
+                if msg_type in ("agent_view", "turn_advanced"):
+                    view = msg.get("view", {})
+                    reason = msg.get("reason", "sync")
+
+                    if view:
+                        self.current_game.update_view(view, reason)
+
+                        # CEK KEMATIAN DARI VIEW
+                        if not self.current_game.is_alive:
+                            logger.info(f"💀 Agent is dead (from view), restarting...")
+                            if self.knowledge:
+                                self.knowledge.record_outcome("death", {
+                                    "kills": self.current_game.kills,
+                                    "survival_time": self.current_game.survival_time
+                                })
+                            raise AgentDeadError("Agent dead (from view)")
+
+                        # CEK HP = 0
+                        if self.current_game.hp <= 0:
+                            logger.info(f"💀 Agent HP is 0, restarting...")
+                            if self.knowledge:
+                                self.knowledge.record_outcome("death", {
+                                    "kills": self.current_game.kills,
+                                    "survival_time": self.current_game.survival_time
+                                })
+                            raise AgentDeadError("Agent HP is 0")
+
+                        # CEK STUCK
+                        if last_hp == self.current_game.hp and last_turn == self.current_game.turn:
+                            stuck_counter += 1
+                            if stuck_counter > 10:
+                                logger.warning(f"⚠️ Game stuck for {stuck_counter} turns, forcing restart...")
+                                raise AgentDeadError("Game stuck - forcing restart")
+                        else:
+                            stuck_counter = 0
+                        last_hp = self.current_game.hp
+                        last_turn = self.current_game.turn
+
+                        can_act = msg.get("canAct", self.current_game.can_act)
+                        await self._act(ws, can_act)
+
+                        if can_act:
+                            last_action_time = current_time
+                    continue
+
+                # ===== ACTION_SYNC =====
+                if msg_type == "action_sync":
+                    view = msg.get("view", {})
+                    if view:
+                        self.current_game.update_view(view, "action_sync")
+                        if not self.current_game.is_alive:
+                            logger.info(f"💀 Agent is dead (from action_sync), restarting...")
+                            if self.knowledge:
+                                self.knowledge.record_outcome("death", {
+                                    "kills": self.current_game.kills,
+                                    "survival_time": self.current_game.survival_time
+                                })
+                            raise AgentDeadError("Agent dead (from action_sync)")
+                    self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
+                    if self.current_game.can_act:
+                        last_action_time = current_time
+                    continue
+
+                # ===== ACTION_REJECTED =====
+                if msg_type == "action_rejected":
+                    view = msg.get("view", {})
+                    if view:
+                        self.current_game.update_view(view, "action_rejected")
+                        if not self.current_game.is_alive:
+                            logger.info(f"💀 Agent is dead (from action_rejected), restarting...")
+                            if self.knowledge:
+                                self.knowledge.record_outcome("death", {
+                                    "kills": self.current_game.kills,
+                                    "survival_time": self.current_game.survival_time
+                                })
+                            raise AgentDeadError("Agent dead (from action_rejected)")
+                    self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
+                    if view and self.current_game.is_alive:
+                        await self._act(ws, self.current_game.can_act)
+                    continue
+
+                # ===== ACTION_RESULT =====
+                if msg_type == "action_result":
+                    self.current_game.can_act = bool(msg.get("canAct", self.current_game.can_act))
+                    error = msg.get("error")
+                    action = msg.get("action")
+
+                    if action and action.get("type") == "pickup":
+                        item_id = action.get("itemInstanceId")
+                        if error:
+                            if item_id:
+                                self.current_game.mark_item_attempted(item_id)
+                                self.current_game.mark_item_collected(item_id)
+                                logger.debug(f"❌ Pickup failed for {item_id[:8]}, marked as collected")
+                        else:
+                            if item_id:
+                                self.current_game.mark_item_collected(item_id)
+                                logger.info(f"✅ Pickup success for {item_id[:8]}, marked as collected")
+
+                    if error:
+                        code = error.get("code")
+                        message = error.get("message", "")
+
+                        if code == "AGENT_DEAD":
+                            logger.info(f"💀 Agent dead from action_result: {message}")
+                            raise AgentDeadError(f"Agent dead: {message}")
+
+                        if code == "TARGET_DEAD":
+                            logger.info(f"🎯 TARGET_DEAD - recomputing (turn {self.current_game.turn})")
+                            view = msg.get("view", {})
+                            if view:
+                                self.current_game.update_view(view, "action_result")
+                                if not self.current_game.is_alive:
+                                    raise AgentDeadError("Agent dead from action_result view")
+                                await self._act(ws, self.current_game.can_act)
+                            continue
+
+                        if code == "ACTION_FAILED":
+                            logger.warning(f"⚠️ Action failed: {message}")
+                            view = msg.get("view", {})
+                            if view:
+                                self.current_game.update_view(view, "action_result")
+                                if not self.current_game.is_alive:
+                                    raise AgentDeadError("Agent dead from action_result view")
+                                await self._act(ws, self.current_game.can_act)
+                            continue
+
+                    if msg.get("action"):
+                        self.total_actions += 1
+                        self.successful_actions += 1
+                        self.strategy.reset_rejection_counter()
+                        last_action_time = current_time
+                    continue
+
+                if msg_type not in ["log", "message_sent", "rest_completed"]:
+                    logger.debug(f"📨 Unknown message type: {msg_type}")
+
+            except asyncio.TimeoutError:
+                logger.warning("⏰ WebSocket receive timeout, checking connection...")
+                continue
+            except ResumeTargetDeadError:
+                raise
+            except AgentDeadError:
+                raise
+            except ConnectionClosed as e:
+                if e.code == 1013 and "RESUME_TARGET_DEAD" in str(e.reason):
+                    raise ResumeTargetDeadError(f"Resume target dead: {e.reason}")
+                raise
+            except Exception as e:
+                logger.exception(f"💥 Gameplay error: {e}")
+                raise
 
     async def _act(self, ws: WSClient, can_act: bool):
         """Ambil tindakan menggunakan Hybrid AI"""
@@ -429,12 +628,6 @@ class Driver:
         logger.info(f"   Explore Priority: {stats.get('explore_priority', 0)}")
         logger.info(f"   Total Actions: {self.total_actions}")
         logger.info(f"   Success Rate: {self.successful_actions / max(self.total_actions, 1) * 100:.1f}%")
-        
-        # Log auto-equip status
-        if self.last_equip_result:
-            changes = self.last_equip_result.get("changes", [])
-            if changes:
-                logger.info(f"   Last Equip: {', '.join(changes)}")
         logger.info("=" * 60)
 
     def get_performance(self) -> Dict[str, Any]:
@@ -448,9 +641,5 @@ class Driver:
             "success_rate": self.successful_actions / max(self.total_actions, 1),
             "hybrid_stats": self.ai.get_stats() if hasattr(self.ai, 'get_stats') else {},
             "current_state": self.current_game.entry_type if self.current_game else "none",
-            "is_in_game": self.current_game is not None and self.current_game.is_alive,
-            "auto_equip": {
-                "games_since_equip": self.games_since_equip,
-                "last_equip_changes": self.last_equip_result.get("changes", []) if self.last_equip_result else []
-            }
+            "is_in_game": self.current_game is not None and self.current_game.is_alive
         }
