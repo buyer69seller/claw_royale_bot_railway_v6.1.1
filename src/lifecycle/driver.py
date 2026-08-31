@@ -93,6 +93,19 @@ class Driver:
         self._current_region_id: Optional[str] = None
         self._region_loop_detected: bool = False
 
+    def set_strategy_mode(self, mode: str):
+        """
+        Set strategi mode untuk Hybrid Strategy v7
+        
+        Args:
+            mode: 'ai_auto_pilot' | 'competitive_v7' | 'hybrid_v7'
+        """
+        if hasattr(self.strategy, 'set_mode'):
+            self.strategy.set_mode(mode)
+            logger.info(f"🎯 Strategy mode set to: {mode}")
+        else:
+            logger.warning(f"⚠️ Strategy mode not supported: {mode}")
+
     async def run(self):
         """Loop utama driver"""
         logger.info("🚀 Driver run() started!")
