@@ -236,6 +236,48 @@ class HybridAIEngine:
             
             # === PRIORITY 1: SURVIVAL ===
             # src/ai/hybrid_engine.py - di _priority_decision
+        # src/ai/hybrid_engine.py - di _priority_decision, bagian PRIORITY 1: SURVIVAL
+
+        # === PRIORITY 1: SURVIVAL ===
+        
+        # ===== USE ITEM DARI INVENTORY (BARU) =====
+        # HP < 50% dan ada item healing di inventory → USE
+        if hp_ratio < 0.5 and state.has_healing_items():
+            best_heal = state.get_best_healing_item()
+            if best_heal:
+                heal_amount = float(best_heal.get("heal", best_heal.get("healAmount", 0)))
+                if heal_amount > 0:
+                    self.stats["survival_priority"] += 1
+                    item_id = best_heal.get("instanceId") or best_heal.get("id")
+                    if item_id:
+                        logger.info(f"💚 Using healing item: {heal_amount} HP (HP: {hp_ratio:.0%})")
+                        state.remove_from_inventory(item_id)
+                        return PriorityDecision(
+                            priority=1,
+                            action_type="use",
+                            target_id=item_id,
+                            reasoning=f"Using healing item ({heal_amount} HP)",
+                            confidence=0.98
+                        )
+        
+        # HP < 40% → CARI HEALING ITEM DI GROUND
+        if hp_ratio < 0.4:
+            healing_items = state.get_healing_items()
+            for item in healing_items:
+                heal = float(item.get("heal", item.get("healAmount", 0)))
+                if heal > 0:
+                    distance = state._calculate_distance(state.get_self(), item)
+                    if distance < 3:
+                        self.stats["survival_priority"] += 1
+                        item_id = item.get("instanceId") or item.get("id")
+                        state.mark_item_attempted(item_id)
+                        return PriorityDecision(
+                            priority=1,
+                            action_type="pickup",
+                            target_id=item_id,
+                            reasoning=f"Pickup healing ({heal} HP) - HP: {hp_ratio:.0%}",
+                            confidence=0.95
+                        )
         # === PRIORITY 1: SURVIVAL ===
         
         # HP < 40% → CARI HEALING ITEM DAN USE
