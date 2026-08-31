@@ -1,6 +1,4 @@
 # src/services/__init__.py
-"""Services module untuk bot"""
-
 from .reward_service import RewardService
 from .loadout_service import LoadoutService
 from .marketplace_service import MarketplaceService
