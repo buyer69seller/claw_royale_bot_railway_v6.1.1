@@ -128,7 +128,18 @@ async def main():
                 logger.info("✅ Loadout already full")
         except Exception as e:
             logger.debug(f"Loadout optimization skipped: {e}")
-
+        # ===== AUTO-EQUIP BEST ITEMS (BARU) =====
+        try:
+            from .services.inventory_service import InventoryService
+            inventory_service = InventoryService(rest)
+            logger.info("🔧 Auto-equipping best items...")
+            result = await inventory_service.auto_equip_best()
+            if result.get("changes"):
+                logger.info(f"✅ Auto-equipped: {result['changes']}")
+            if result.get("errors"):
+                logger.warning(f"⚠️ Auto-equip errors: {result['errors']}")
+        except Exception as e:
+            logger.debug(f"Auto-equip skipped: {e}")
         # ===== DRIVER SETUP =====
         logger.info("=" * 60)
         logger.info("🚀 Starting Hybrid AI Auto-Pilot...")
