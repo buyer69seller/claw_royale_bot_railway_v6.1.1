@@ -8,7 +8,28 @@ logger = logging.getLogger(__name__)
 
 class ActionBuilder:
     """Builder untuk berbagai jenis action"""
+
+    @staticmethod
+    def use_item(item: Dict) -> Optional[Dict]:
+        """
+        Build action use item (heal)
+        DIGUNAKAN untuk menggunakan item dari inventory
+        """
+        if not item:
+            return None
+        
+        item_id = item.get("instanceId") or item.get("id")
+        if not item_id:
+            return None
+        
+        return {"type": "use", "itemInstanceId": item_id}
     
+    @staticmethod
+    def use_item_by_id(item_id: str) -> Optional[Dict]:
+        """Use item by ID langsung"""
+        if not item_id:
+            return None
+        return {"type": "use", "itemInstanceId": item_id}
     @staticmethod
     def pickup(item: Dict) -> Optional[Dict]:
         item_id = item.get("instanceId") or item.get("itemInstanceId") or item.get("id")
