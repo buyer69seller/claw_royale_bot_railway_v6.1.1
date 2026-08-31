@@ -759,6 +759,16 @@ class Driver:
         """Ambil tindakan menggunakan Hybrid AI"""
         if not can_act or not self.current_game or not self.current_game.is_alive:
             return
+            # ===== RATE LIMIT PROTECTION =====
+        # Maksimum 1 action per 0.5 detik
+        if hasattr(self, '_last_action_time'):
+            elapsed = __import__('time').time() - self._last_action_time
+            if elapsed < 0.5:
+                logger.debug(f"⏳ Rate limit: waiting {0.5 - elapsed:.2f}s")
+                await asyncio.sleep(0.5 - elapsed)
+        
+        self._last_action_time = __import__('time').time()
+        
 
         try:
             if self.ai_enabled:
