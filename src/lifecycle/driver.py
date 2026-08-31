@@ -1,10 +1,10 @@
 # src/lifecycle/driver.py
-"""Driver utama dengan Hybrid AI (AI Auto-Pilot + Competitive v7) + RL"""
+"""Driver utama dengan Hybrid AI (AI Auto-Pilot + Competitive v7) + RL + Region Tracking"""
 
 import asyncio
 import logging
 import json
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Set
 
 from websockets.exceptions import ConnectionClosed
 
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class Driver:
-    """Driver utama bot dengan Hybrid AI + RL"""
+    """Driver utama bot dengan Hybrid AI + RL + Region Tracking"""
 
     def __init__(self, rest_client: RestClient):
         self.rest = rest_client
@@ -73,6 +73,12 @@ class Driver:
             "success": False
         }
         self._rl_reward_buffer = []
+        
+        # ===== REGION TRACKING =====
+        self._visited_regions: Set[str] = set()
+        self._region_visit_count: Dict[str, int] = {}
+        self._current_region_id: Optional[str] = None
+        self._region_loop_detected: bool = False
 
     async def run(self):
         """Loop utama driver"""
@@ -130,6 +136,7 @@ class Driver:
                 if e.code == 1013:
                     logger.info("🔄 Resume target dead, starting new game...")
                     self.current_game = None
+                    self._reset_region_tracking()
                     await asyncio.sleep(2)
                     continue
                 elif e.code == 4008:
@@ -144,6 +151,7 @@ class Driver:
                 elif e.code == 4032:
                     logger.info("💀 Agent dead (from close code), restarting...")
                     self.current_game = None
+                    self._reset_region_tracking()
                     await asyncio.sleep(2)
                     continue
                 else:
@@ -162,6 +170,7 @@ class Driver:
                     })
                 self.current_game = None
                 self.strategy.reset_rejection_counter()
+                self._reset_region_tracking()
                 # Reset hybrid AI stats
                 self.ai.stats = {
                     "decisions_made": 0,
@@ -199,6 +208,31 @@ class Driver:
                 await asyncio.sleep(self.delay)
                 self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
 
+    def _reset_region_tracking(self):
+        """Reset region tracking untuk game baru"""
+        self._visited_regions.clear()
+        self._region_visit_count.clear()
+        self._current_region_id = None
+        self._region_loop_detected = False
+        logger.debug("🗺️ Region tracking reset for new game")
+
+    def _track_region(self, region_id: str):
+        """Track region yang dikunjungi"""
+        if not region_id:
+            return
+        
+        self._visited_regions.add(region_id)
+        self._region_visit_count[region_id] = self._region_visit_count.get(region_id, 0) + 1
+        self._current_region_id = region_id
+        
+        # Deteksi loop
+        visit_count = self._region_visit_count[region_id]
+        if visit_count > 3:
+            self._region_loop_detected = True
+            logger.warning(f"⚠️ Region {region_id[:8]} visited {visit_count}x - possible loop!")
+        else:
+            self._region_loop_detected = False
+
     async def _load_pack_modifiers(self):
         """Load pack modifiers dari loadout untuk strategy"""
         try:
@@ -226,9 +260,13 @@ class Driver:
             return False
 
     async def _start_game(self, entry_type: str):
-        """Mulai game baru - via WebSocket dengan Hybrid AI + RL"""
+        """Mulai game baru - reset semua tracking"""
         logger.info(f"🎮 Joining {entry_type} game...")
         logger.info(f"🔑 API Key: {self.rest.api_key[:10]}...")
+        
+        # ===== RESET REGION TRACKING =====
+        self._reset_region_tracking()
+        logger.info("🗺️ Region tracking reset for new game")
 
         try:
             # ===== LOAD PACK MODIFIERS =====
@@ -456,11 +494,12 @@ class Driver:
             await self._start_game(entry_type)
 
     async def _play_game(self, ws: WSClient):
-        """Loop gameplay dengan Hybrid AI + RL"""
+        """Loop gameplay dengan Hybrid AI + RL + Region Tracking"""
         logger.info("🎮 Starting Hybrid AI-powered gameplay loop...")
         logger.info("🧠 Hybrid AI = AI Auto-Pilot + Competitive v7 + RL")
         logger.info("👻 Only detecting OWN death, ignoring other agents")
         logger.info("🗺️ Ruin & Alert monitoring active")
+        logger.info("🗺️ Region tracking active - avoiding loops")
 
         # Timeout tracking
         last_action_time = __import__('time').time()
@@ -492,6 +531,14 @@ class Driver:
 
                 if msg_type in ("agent_view", "turn_advanced", "action_sync"):
                     last_view_time = __import__('time').time()
+                    
+                    # ===== TRACK REGION =====
+                    if msg_type == "agent_view":
+                        view = msg.get("view", {})
+                        region = view.get("currentRegion", {})
+                        region_id = region.get("id")
+                        if region_id:
+                            self._track_region(region_id)
 
                 # ===== CEK TIMEOUT =====
                 current_time = __import__('time').time()
@@ -644,19 +691,17 @@ class Driver:
                     error = msg.get("error")
                     action = msg.get("action")
 
-                    # ===== RL REWARD TRACKING (BARU) =====
+                    # ===== RL REWARD TRACKING =====
                     if action:
                         action_type = action.get("type", "")
                         item_id = action.get("itemInstanceId")
                         
                         if error:
-                            # Action gagal
                             self._rl_action_tracking["success"] = False
                             if self.ai and hasattr(self.ai, '_update_rl_reward'):
                                 self.ai._update_rl_reward(self.current_game, action_type, False)
                             logger.debug(f"❌ RL: Action {action_type} failed")
                         else:
-                            # Action berhasil
                             self._rl_action_tracking["success"] = True
                             if self.ai and hasattr(self.ai, '_update_rl_reward'):
                                 self.ai._update_rl_reward(self.current_game, action_type, True)
@@ -812,7 +857,8 @@ class Driver:
                     
                     # ===== RL TRACKING: Simpan action yang dikirim =====
                     self._rl_action_tracking["action"] = decision.action_type
-                    self._rl_action_tracking["state"] = self.ai.rl_agent.get_state_features(self.current_game)
+                    if hasattr(self.ai, 'rl_agent'):
+                        self._rl_action_tracking["state"] = self.ai.rl_agent.get_state_features(self.current_game)
                     self._rl_action_tracking["timestamp"] = __import__('time').time()
                     
                     await ws.send_action(action, thought=thought)
@@ -865,7 +911,6 @@ class Driver:
             item = self._find_target(target_id, "items")
             if item:
                 return ActionBuilder.use_item(item)
-            # Jika target_id adalah item_id langsung
             if target_id:
                 return ActionBuilder.use_item_by_id(target_id)
 
@@ -930,6 +975,14 @@ class Driver:
         logger.info(f"   Total Actions: {self.total_actions}")
         logger.info(f"   Success Rate: {self.successful_actions / max(self.total_actions, 1) * 100:.1f}%")
         
+        # ===== REGION STATS =====
+        logger.info("-" * 40)
+        logger.info("🗺️ Region Stats")
+        logger.info(f"   Visited Regions: {len(self._visited_regions)}")
+        logger.info(f"   Region Loop Detected: {self._region_loop_detected}")
+        if self._visited_regions:
+            logger.info(f"   Last 5 Regions: {list(self._visited_regions)[-5:]}")
+        
         # ===== RL STATS =====
         if hasattr(self.ai, 'rl_agent'):
             rl_stats = self.ai.rl_agent.get_stats()
@@ -957,6 +1010,13 @@ class Driver:
             "hybrid_stats": self.ai.get_stats() if hasattr(self.ai, 'get_stats') else {},
             "current_state": self.current_game.entry_type if self.current_game else "none",
             "is_in_game": self.current_game is not None and self.current_game.is_alive
+        }
+        
+        # ===== REGION STATS =====
+        result["region_stats"] = {
+            "visited_regions": len(self._visited_regions),
+            "loop_detected": self._region_loop_detected,
+            "regions": list(self._visited_regions)
         }
         
         # ===== RL STATS =====
