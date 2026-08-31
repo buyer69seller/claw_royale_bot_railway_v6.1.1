@@ -235,6 +235,33 @@ class HybridAIEngine:
             my_atk = float(me.get("attack", me.get("atk", 0)))
             
             # === PRIORITY 1: SURVIVAL ===
+            # src/ai/hybrid_engine.py - di _priority_decision
+        # === PRIORITY 1: SURVIVAL ===
+        
+        # HP < 40% → CARI HEALING ITEM DAN USE
+        if hp_ratio < 0.4:
+            # Cari healing item di inventory terlebih dahulu
+            # Note: inventory tidak ada di agent_view, perlu REST API
+            # Untuk sekarang, cari item healing di ground
+            
+            healing_items = state.get_healing_items()
+            for item in healing_items:
+                heal = float(item.get("heal", item.get("healAmount", 0)))
+                if heal > 0:
+                    distance = state._calculate_distance(state.get_self(), item)
+                    if distance < 3:
+                        self.stats["survival_priority"] += 1
+                        item_id = item.get("instanceId") or item.get("id")
+                        state.mark_item_attempted(item_id)
+                        
+                        # Jika item healing, ambil dulu
+                        return PriorityDecision(
+                            priority=1,
+                            action_type="pickup",
+                            target_id=item_id,
+                            reasoning=f"Pickup healing ({heal} HP) - HP: {hp_ratio:.0%}",
+                            confidence=0.95
+                        )
             
             # HP < 40% → CARI HEALING ITEM
             if hp_ratio < 0.4:
