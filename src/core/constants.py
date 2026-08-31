@@ -79,9 +79,9 @@ AI_CONFIDENCE_THRESHOLD = 0.6
 AI_RISK_THRESHOLD = 0.7
 AI_STRATEGY_SWITCH_INTERVAL = 10
 
-# ===== AUTO-EQUIP Constants (TAMBAHKAN INI) =====
+# ===== AUTO-EQUIP Constants =====
 AUTO_EQUIP_ENABLED = True
-AUTO_EQUIP_INTERVAL_GAMES = 3  # Auto-equip setiap 3 game
+AUTO_EQUIP_INTERVAL_GAMES = 3
 AUTO_EQUIP_ON_STARTUP = True
 
 # ===== PRE-SEASON 1 PACK DATA =====
@@ -199,15 +199,70 @@ PACK_EFFECTS: Dict[str, Dict] = {
     }
 }
 
-# Relic affix priorities
-RELIC_AFFIX_PRIORITY = {
-    "ATK": 5,
-    "DMG": 5,
-    "HP": 4,
-    "DEF": 4,
-    "Item ATK": 3,
-    "Explore": 2,
-    "Heal": 2
+# ===== PRE-SEASON 1 RELIC DATA (TAMBAHKAN INI) =====
+
+# Relic slot mapping
+RELIC_SLOTS = {
+    "Ruby": 0,
+    "Emerald": 1,
+    "Sapphire": 2
+}
+
+# Relic affix definitions
+RELIC_AFFIXES: Dict[str, Dict] = {
+    "atk": {
+        "positive": {"name": "Ferocious", "min": 1, "max": 10},
+        "negative": {"name": "Feeble", "min": -10, "max": -1}
+    },
+    "def": {
+        "positive": {"name": "Unyielding", "min": 1, "max": 5},
+        "negative": {"name": "Fragile", "min": -5, "max": -1}
+    },
+    "explore": {
+        "positive": {"name": "Insightful", "min": 1, "max": 1},
+        "negative": {"name": "Deluded", "min": -1, "max": -1}
+    },
+    "item_atk": {
+        "positive": {"name": "Sharp", "min": 5, "max": 15},
+        "negative": {"name": "Blunt", "min": -15, "max": -5}
+    },
+    "max_hp": {
+        "positive": {"name": "Sturdy", "min": 1, "max": 10},
+        "negative": {"name": "Sickly", "min": -10, "max": -1}
+    },
+    "max_ep": {
+        "positive": {"name": "Bountiful", "min": 1, "max": 2},
+        "negative": {"name": "Withered", "min": -2, "max": -1}
+    },
+    "ep_regen": {
+        "positive": {"name": "Energized", "min": 1, "max": 1},
+        "negative": {"name": "Sluggish", "min": -1, "max": -1}
+    },
+    "hp_regen": {
+        "positive": {"name": "Regenerating", "min": 1, "max": 3},
+        "negative": {"name": "Festering", "min": -3, "max": -1}
+    }
+}
+
+# Relic affix priority (higher = better)
+RELIC_AFFIX_PRIORITY: Dict[str, int] = {
+    "atk": 5,
+    "item_atk": 4,
+    "max_hp": 4,
+    "def": 3,
+    "hp_regen": 3,
+    "explore": 2,
+    "max_ep": 2,
+    "ep_regen": 1
+}
+
+# Inventory caps
+INVENTORY_CAPS: Dict[str, int] = {
+    "in_game_relics": 5,
+    "in_game_packs": 1,
+    "lobby_relics": 15,
+    "lobby_packs": 5,
+    "items": 10
 }
 
 # ===== PACK HELPER FUNCTIONS =====
@@ -237,10 +292,8 @@ def get_pack_tier_effect(pack_name: str, tier: int, slot: str = "main") -> Dict:
     if not base_effect:
         return {}
     
-    # Tier multiplier (T1 = 1.0, T2 = 0.8, T3 = 0.6)
     tier_multiplier = {1: 1.0, 2: 0.8, 3: 0.6}.get(tier, 1.0)
     
-    # Apply tier multiplier to numeric values
     result = {}
     for key, value in base_effect.items():
         if isinstance(value, (int, float)):
@@ -251,15 +304,7 @@ def get_pack_tier_effect(pack_name: str, tier: int, slot: str = "main") -> Dict:
     return result
 
 def get_pack_recommendation(strategy_type: str = "balanced") -> Dict[str, str]:
-    """
-    Dapatkan rekomendasi pack berdasarkan strategi
-    
-    Args:
-        strategy_type: "survival", "damage", "stealth", "balanced", "economy"
-    
-    Returns:
-        Dict dengan main_pack dan sub_pack
-    """
+    """Dapatkan rekomendasi pack berdasarkan strategi"""
     recommendations = {
         "survival": {
             "main": "Thorns",
@@ -299,3 +344,70 @@ def get_pack_recommendation(strategy_type: str = "balanced") -> Dict[str, str]:
     }
     
     return recommendations.get(strategy_type, recommendations["balanced"])
+
+# ===== RELIC HELPER FUNCTIONS (TAMBAHKAN INI) =====
+
+def get_relic_slot(gem_type: str) -> Optional[int]:
+    """Dapatkan slot untuk relic berdasarkan gem type"""
+    return RELIC_SLOTS.get(gem_type)
+
+def get_affix_display_name(stat: str, value: int) -> str:
+    """Dapatkan display name affix berdasarkan stat dan value"""
+    affix_data = RELIC_AFFIXES.get(stat)
+    if not affix_data:
+        return stat
+    
+    if value >= 0:
+        return affix_data["positive"]["name"]
+    else:
+        return affix_data["negative"]["name"]
+
+def score_relic(relic: Dict) -> float:
+    """
+    Skor relic berdasarkan affixes
+    - ATK: nilai tertinggi
+    - Item ATK: nilai tinggi
+    - Max HP: nilai sedang
+    - DEF: nilai sedang
+    - HP Regen: nilai sedang
+    """
+    affixes = relic.get("affixes", [])
+    tier = relic.get("tier", 0)
+    
+    score = tier * 10
+    
+    for affix in affixes:
+        stat = affix.get("stat", "")
+        value = affix.get("value", 0)
+        
+        priority = RELIC_AFFIX_PRIORITY.get(stat, 1)
+        score += value * priority
+    
+    # Bonus untuk positive affixes
+    if score > 0:
+        score *= 1.2
+    
+    return score
+
+def get_best_relics(relics: List[Dict], count: int = 3) -> List[Dict]:
+    """Dapatkan N relic terbaik berdasarkan skor"""
+    scored = [(r, score_relic(r)) for r in relics]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [r for r, _ in scored[:count]]
+
+def get_relic_summary(relic: Dict) -> str:
+    """Dapatkan ringkasan relic dalam format string"""
+    gem_type = relic.get("type", relic.get("gem_type", "Unknown"))
+    affixes = relic.get("affixes", [])
+    
+    if not affixes:
+        return gem_type
+    
+    names = []
+    for affix in affixes:
+        stat = affix.get("stat", "")
+        value = affix.get("value", 0)
+        name = get_affix_display_name(stat, value)
+        names.append(name)
+    
+    return f"{' '.join(names)} {gem_type}"
