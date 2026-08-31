@@ -111,11 +111,41 @@ class Driver:
                 self.delay = MIN_RETRY_DELAY
                 continue
 
+# src/lifecycle/driver.py - di run() method
+
             except ConnectionClosed as e:
                 logger.warning(f"🔌 WebSocket closed: {e.code} - {e.reason}")
-                if e.code in (1013, 4008, 4030, 4031):
+                
+                # Handle specific close codes
+                if e.code == 1013:
+                    # Resume target dead - rejoin baru
+                    logger.info("🔄 Resume target dead, starting new game...")
+                    self.current_game = None
+                    await asyncio.sleep(2)
+                    continue
+                    
+                elif e.code == 4008:
+                    # Rate limit - wait longer
+                    logger.warning("⏳ Rate limited, waiting 10s...")
+                    await asyncio.sleep(10)
+                    self.delay = MIN_RETRY_DELAY
+                    continue
+                    
+                elif e.code in (4030, 4031):
+                    # Agent already in game or game full
+                    logger.info("🔄 Agent in game or game full, retrying...")
                     await asyncio.sleep(3)
+                    continue
+                    
+                elif e.code == 4032:
+                    # Agent dead - restart
+                    logger.info("💀 Agent dead (from close code), restarting...")
+                    self.current_game = None
+                    await asyncio.sleep(2)
+                    continue
+                    
                 else:
+                    # Unknown - exponential backoff
                     await asyncio.sleep(self.delay)
                     self.delay = min(self.delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
 
