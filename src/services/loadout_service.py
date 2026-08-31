@@ -11,7 +11,9 @@ from ..core.constants import (
     PACK_EFFECTS,
     RELIC_AFFIX_PRIORITY,
     RELIC_SLOTS,
-    INVENTORY_CAPS
+    INVENTORY_CAPS,
+    PACK_ATTENUATION,
+    SUB_ATTENUATION_MODES
 )
 
 logger = logging.getLogger(__name__)
@@ -54,7 +56,175 @@ class LoadoutService:
         else:
             return effects.get("sub")
     
+    # ===== TIER & SUB LOGIC (BARU) =====
+    
+    def get_sub_attenuation(self, pack_name: str) -> Dict[str, Any]:
+        """
+        Dapatkan informasi attenuasi Sub slot untuk pack
+        Berdasarkan Pre-S1: ×0.5, Partial, Sub value, Main only
+        """
+        attenuation = PACK_ATTENUATION.get(pack_name, {})
+        mode = attenuation.get("mode", "MULTIPLY_0_5")
+        
+        if mode == "MAIN_ONLY":
+            return {
+                "mode": "MAIN_ONLY",
+                "can_use_sub": False,
+                "description": "Cannot be placed in Sub slot",
+                "priority_penalty": 0
+            }
+        elif mode == "MULTIPLY_0_5":
+            factor = attenuation.get("sub_factor", 0.5)
+            return {
+                "mode": "MULTIPLY_0_5",
+                "can_use_sub": True,
+                "factor": factor,
+                "description": f"Final value halved (×{factor})",
+                "priority_penalty": 0.5
+            }
+        elif mode == "PARTIAL":
+            sub_factors = attenuation.get("sub_factors", {})
+            return {
+                "mode": "PARTIAL",
+                "can_use_sub": True,
+                "factors": sub_factors,
+                "description": "Only certain coefficients reduced",
+                "priority_penalty": 0.3
+            }
+        elif mode == "SUB_VALUE":
+            sub_effect = attenuation.get("sub_effect", {})
+            return {
+                "mode": "SUB_VALUE",
+                "can_use_sub": True,
+                "effect": sub_effect,
+                "description": "Replaced with Sub-only value",
+                "priority_penalty": 0.2
+            }
+        
+        return {"mode": "UNKNOWN", "can_use_sub": True, "priority_penalty": 0.5}
+    
+    def get_pack_tier_effect(self, pack_name: str, tier: int, slot: str = "main") -> Dict:
+        """
+        Dapatkan efek pack berdasarkan tier dan slot
+        T1 = 100%, T2 = 80%, T3 = 60%
+        """
+        base_effect = self.get_pack_effect(pack_name, slot)
+        if not base_effect:
+            return {}
+        
+        # Tier multiplier (T1 = 1.0, T2 = 0.8, T3 = 0.6)
+        tier_multiplier = {1: 1.0, 2: 0.8, 3: 0.6}.get(tier, 1.0)
+        
+        # Dapatkan attenuasi sub
+        sub_info = self.get_sub_attenuation(pack_name)
+        
+        # Apply tier multiplier to numeric values
+        result = {}
+        for key, value in base_effect.items():
+            if isinstance(value, (int, float)):
+                # Apply tier multiplier
+                tiered_value = value * tier_multiplier
+                
+                # Apply sub attenuation if slot is sub
+                if slot == "sub" and sub_info.get("mode") == "MULTIPLY_0_5":
+                    tiered_value *= sub_info.get("factor", 0.5)
+                
+                result[key] = tiered_value
+            else:
+                result[key] = value
+        
+        return result
+    
+    def get_pack_tier_priority(self, pack_name: str, tier: int, slot: str = "main") -> float:
+        """
+        Dapatkan prioritas pack berdasarkan tier dan slot
+        """
+        # Base priority: T1 > T2 > T3
+        tier_priority = {1: 3.0, 2: 2.0, 3: 1.0}.get(tier, 0)
+        
+        # Main slot bonus
+        slot_bonus = 1.5 if slot == "main" else 1.0
+        
+        # Sub attenuation penalty
+        sub_info = self.get_sub_attenuation(pack_name)
+        if sub_info.get("mode") == "MAIN_ONLY":
+            return 0 if slot == "sub" else tier_priority * 2
+        
+        # Pack specific bonuses
+        pack_bonus = self._get_pack_bonus(pack_name, slot)
+        
+        # Apply penalty for sub slot
+        penalty = sub_info.get("priority_penalty", 0)
+        if slot == "sub":
+            slot_bonus *= (1 - penalty)
+        
+        return tier_priority * slot_bonus * pack_bonus
+    
+    def _get_pack_bonus(self, pack_name: str, slot: str) -> float:
+        """Dapatkan bonus spesifik untuk pack"""
+        bonuses = {
+            "Thorns": 1.3,
+            "Heart of the Giant": 1.25,
+            "Berserker": 1.2,
+            "Double Attack": 1.15,
+            "Last Stand": 1.15,
+            "Iron Heart": 1.1,
+            "Ruin Expert": 1.1,
+            "Assassin": 1.2,
+            "Goliath": 1.1,
+            "Item Expert": 1.05,
+            "Moltz Expert": 1.05
+        }
+        
+        base_bonus = bonuses.get(pack_name, 1.0)
+        
+        # Sub slot penalty for some packs
+        if slot == "sub" and pack_name in ["Assassin", "Scout"]:
+            return 0  # Main only
+        
+        return base_bonus
+    
+    def get_best_pack_for_slot(self, slot: str, excluded: List[str] = None) -> Optional[Dict]:
+        """
+        Dapatkan pack terbaik untuk slot tertentu (main/sub)
+        Mempertimbangkan tier dan attenuasi
+        """
+        inventory = await self.rest.get_inventory()
+        packs = inventory.get("packs", [])
+        
+        if excluded is None:
+            excluded = []
+        
+        best_pack = None
+        best_score = 0
+        
+        for pack in packs:
+            pack_name = pack.get("name", "")
+            
+            # Skip jika sudah digunakan
+            if pack_name in excluded:
+                continue
+            
+            # Cek apakah pack bisa di slot ini
+            if slot == "main":
+                if not self.is_main_only(pack_name) and not self.is_sub_capable(pack_name):
+                    continue
+            else:  # sub
+                sub_info = self.get_sub_attenuation(pack_name)
+                if not sub_info.get("can_use_sub", False):
+                    continue
+            
+            tier = pack.get("tier", 0)
+            score = self.get_pack_tier_priority(pack_name, tier, slot)
+            
+            if score > best_score:
+                best_score = score
+                best_pack = pack
+        
+        return best_pack
+    
     async def get_best_pack_combo(self) -> Dict[str, Any]:
+        """Dapatkan kombinasi pack terbaik dengan tier & sub logic"""
         inventory = await self.rest.get_inventory()
         packs = inventory.get("packs", [])
         
@@ -69,15 +239,28 @@ class LoadoutService:
         }
         
         for main in main_packs:
+            main_name = main.get("name", "")
+            main_tier = main.get("tier", 0)
+            main_score = self.get_pack_tier_priority(main_name, main_tier, "main")
+            
             for sub in sub_packs:
-                if main.get("name") == sub.get("name"):
+                sub_name = sub.get("name", "")
+                sub_tier = sub.get("tier", 0)
+                
+                if main_name == sub_name:
                     continue
-                score = self._evaluate_synergy(main, sub)
-                if score > best_combo["score"]:
+                
+                sub_score = self.get_pack_tier_priority(sub_name, sub_tier, "sub")
+                synergy = self._evaluate_synergy(main, sub)
+                
+                total_score = main_score + sub_score + synergy
+                
+                if total_score > best_combo["score"]:
                     best_combo["main"] = main
                     best_combo["sub"] = sub
-                    best_combo["score"] = score
+                    best_combo["score"] = total_score
         
+        # Dapatkan relics terbaik
         relics = inventory.get("relics", [])
         best_relics = await self.get_best_relics(3)
         best_combo["relics"] = best_relics
@@ -85,13 +268,19 @@ class LoadoutService:
         return best_combo
     
     def _evaluate_synergy(self, main: Dict, sub: Dict) -> float:
+        """Evaluasi sinergi antara main dan sub pack"""
         main_name = main.get("name", "")
         sub_name = sub.get("name", "")
+        main_tier = main.get("tier", 0)
+        sub_tier = sub.get("tier", 0)
+        
         score = 0
         
-        score += main.get("tier", 0) * 20
-        score += sub.get("tier", 0) * 15
+        # Tier bonus
+        score += main_tier * 10
+        score += sub_tier * 8
         
+        # Synergy combinations
         synergies = [
             ("Thorns", "Heart of the Giant", 30),
             ("Berserker", "Last Stand", 25),
@@ -104,25 +293,21 @@ class LoadoutService:
         
         for pack1, pack2, bonus in synergies:
             if (pack1 in main_name and pack2 in sub_name) or (pack1 in sub_name and pack2 in main_name):
-                score += bonus
+                # Bonus tier untuk synergy
+                tier_bonus = 1 + (main_tier + sub_tier) * 0.05
+                score += bonus * tier_bonus
         
         return score
     
-    # ===== RELIC SELECTION (BARU) =====
+    # ===== RELIC SELECTION =====
     
     async def get_best_relics(self, count: int = 3) -> List[Dict]:
-        """
-        Dapatkan relic terbaik dari inventory
-        Berdasarkan Pre-S1 relic system
-        """
         inventory = await self.rest.get_inventory()
         relics = inventory.get("relics", [])
         
         if not relics:
-            logger.info("📭 No relics found in inventory")
             return []
         
-        # Skor setiap relic
         scored_relics = []
         for relic in relics:
             score = self._score_relic(relic)
@@ -134,13 +319,9 @@ class LoadoutService:
                 "affix_count": len(relic.get("affixes", []))
             })
         
-        # Sort by score (descending)
         scored_relics.sort(key=lambda x: (x["score"], x["affix_count"]), reverse=True)
-        
-        # Ambil top N
         best = scored_relics[:count]
         
-        # Log selected relics
         for i, r in enumerate(best):
             relic = r["relic"]
             affixes = relic.get("affixes", [])
@@ -151,68 +332,48 @@ class LoadoutService:
         return [r["relic"] for r in best]
     
     def _score_relic(self, relic: Dict) -> float:
-        """
-        Skor relic berdasarkan affixes
-        Pre-S1: 0-3 affixes, same stat can stack
-        """
         affixes = relic.get("affixes", [])
         tier = relic.get("tier", 0)
         
-        # Tier bonus (T1 > T2 > T3)
         score = tier * 10
         
-        # Affix scoring
         for affix in affixes:
             stat = affix.get("stat", "")
             value = affix.get("value", 0)
-            
-            # Prioritaskan positive affixes
             priority = RELIC_AFFIX_PRIORITY.get(stat, 1)
             
-            # Value multiplier
             if value > 0:
-                score += value * priority * 1.5  # Bonus untuk positive
+                score += value * priority * 1.5
             else:
-                score += value * priority * 0.5  # Penalti untuk negative
+                score += value * priority * 0.5
         
-        # Bonus untuk relic dengan banyak affixes
         affix_count = len(affixes)
         if affix_count >= 3:
             score *= 1.3
         elif affix_count >= 2:
             score *= 1.15
         
-        return max(score, -100)  # Minimum score -100
+        return max(score, -100)
     
     def _get_relic_slot(self, relic: Dict) -> int:
-        """
-        Dapatkan slot relic berdasarkan tipe
-        Ruby → slot 0, Emerald → slot 1, Sapphire → slot 2
-        """
         name = relic.get("name", "")
         for gem_name, slot in RELIC_SLOTS.items():
             if gem_name in name:
                 return slot
-        return 0  # Default slot 0
+        return 0
     
     def _get_relic_display_name(self, relic: Dict) -> str:
-        """
-        Dapatkan display name relic
-        Format: Ferocious Sturdy Ruby (affixes + gem name)
-        """
         name = relic.get("name", "Unknown")
         affixes = relic.get("affixes", [])
         
         if not affixes:
             return name
         
-        # Get positive affix names
         affix_names = []
         for affix in affixes:
             stat = affix.get("stat", "")
             value = affix.get("value", 0)
             
-            # Cari display name dari constants
             from ..core.constants import RELIC_AFFIXES
             affix_data = RELIC_AFFIXES.get(stat)
             if affix_data:
@@ -223,13 +384,7 @@ class LoadoutService:
         
         return " ".join(affix_names + [name])
     
-    # ===== RELIC FARMING STRATEGY =====
-    
     def get_relic_farming_priority(self, current_relics: List[Dict]) -> Dict[str, Any]:
-        """
-        Dapatkan prioritas farming relic
-        Berdasarkan relic yang sudah dimiliki
-        """
         if not current_relics:
             return {
                 "priority": "high",
@@ -237,7 +392,6 @@ class LoadoutService:
                 "target_slots": [0, 1, 2]
             }
         
-        # Cek slot yang kosong
         equipped_slots = set()
         for relic in current_relics:
             slot = self._get_relic_slot(relic)
@@ -252,7 +406,6 @@ class LoadoutService:
                 "target_slots": missing_slots
             }
         
-        # Cek kualitas relic
         avg_score = sum(self._score_relic(r) for r in current_relics) / max(len(current_relics), 1)
         
         if avg_score < 30:
@@ -268,13 +421,7 @@ class LoadoutService:
             "target_slots": []
         }
     
-    # ===== INVENTORY MANAGEMENT =====
-    
     async def get_inventory_status(self) -> Dict[str, Any]:
-        """
-        Dapatkan status inventory
-        Termasuk caps dan usage
-        """
         inventory = await self.rest.get_inventory()
         
         relics = inventory.get("relics", [])
@@ -303,7 +450,6 @@ class LoadoutService:
         }
     
     async def optimize_loadout(self) -> Dict[str, Any]:
-        """Optimasi loadout dengan Pre-Season 1 logic"""
         try:
             best = await self.get_best_pack_combo()
             current = await self.get_current_loadout()
@@ -313,18 +459,22 @@ class LoadoutService:
             # Equip main pack
             if best["main"] and best["main"].get("id") != current.get("mainPack", {}).get("id"):
                 await self.rest.equip_main_pack(best["main"]["id"])
-                result["changes"].append(f"Main: {best['main'].get('name')} (T{best['main'].get('tier', 0)})")
+                main_name = best["main"].get("name", "unknown")
+                main_tier = best["main"].get("tier", 0)
+                result["changes"].append(f"Main: {main_name} (T{main_tier})")
             
             # Equip sub pack
             if best["sub"] and best["sub"].get("id") != current.get("subPack", {}).get("id"):
                 await self.rest.equip_sub_pack(best["sub"]["id"])
-                result["changes"].append(f"Sub: {best['sub'].get('name')} (T{best['sub'].get('tier', 0)})")
+                sub_name = best["sub"].get("name", "unknown")
+                sub_tier = best["sub"].get("tier", 0)
+                sub_info = self.get_sub_attenuation(sub_name)
+                result["changes"].append(f"Sub: {sub_name} (T{sub_tier}) - {sub_info.get('description', '')}")
             
             # Equip relics
             current_relic_ids = [r.get("id") for r in current.get("relics", [])]
             for relic in best["relics"]:
                 if relic.get("id") not in current_relic_ids:
-                    # Cek slot
                     slot = self._get_relic_slot(relic)
                     await self.rest.equip_relic(relic["id"])
                     display_name = self._get_relic_display_name(relic)
@@ -335,7 +485,6 @@ class LoadoutService:
             
             logger.info(f"📊 Pack synergy score: {best['score']:.0f}")
             
-            # Log relic summary
             relic_scores = [self._score_relic(r) for r in best.get("relics", [])]
             if relic_scores:
                 logger.info(f"🔮 Relic scores: {relic_scores}")
