@@ -1,5 +1,5 @@
 # src/lifecycle/driver.py
-"""Driver utama dengan Hybrid AI (AI Auto-Pilot + Competitive v7)"""
+"""Driver utama dengan Hybrid AI (AI Auto-Pilot + Competitive v7) + RL"""
 
 import asyncio
 import logging
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class Driver:
-    """Driver utama bot dengan Hybrid AI"""
+    """Driver utama bot dengan Hybrid AI + RL"""
 
     def __init__(self, rest_client: RestClient):
         self.rest = rest_client
@@ -64,6 +64,15 @@ class Driver:
         
         # Rate limit tracking
         self._last_action_time = 0
+        
+        # ===== RL TRACKING =====
+        self._rl_action_tracking: Dict[str, Any] = {
+            "action": None,
+            "state": None,
+            "timestamp": 0,
+            "success": False
+        }
+        self._rl_reward_buffer = []
 
     async def run(self):
         """Loop utama driver"""
@@ -217,7 +226,7 @@ class Driver:
             return False
 
     async def _start_game(self, entry_type: str):
-        """Mulai game baru - via WebSocket dengan Hybrid AI"""
+        """Mulai game baru - via WebSocket dengan Hybrid AI + RL"""
         logger.info(f"🎮 Joining {entry_type} game...")
         logger.info(f"🔑 API Key: {self.rest.api_key[:10]}...")
 
@@ -447,9 +456,9 @@ class Driver:
             await self._start_game(entry_type)
 
     async def _play_game(self, ws: WSClient):
-        """Loop gameplay dengan Hybrid AI - dengan REJOIN on timeout"""
+        """Loop gameplay dengan Hybrid AI + RL"""
         logger.info("🎮 Starting Hybrid AI-powered gameplay loop...")
-        logger.info("🧠 Hybrid AI = AI Auto-Pilot + Competitive v7")
+        logger.info("🧠 Hybrid AI = AI Auto-Pilot + Competitive v7 + RL")
         logger.info("👻 Only detecting OWN death, ignoring other agents")
         logger.info("🗺️ Ruin & Alert monitoring active")
 
@@ -635,6 +644,25 @@ class Driver:
                     error = msg.get("error")
                     action = msg.get("action")
 
+                    # ===== RL REWARD TRACKING (BARU) =====
+                    if action:
+                        action_type = action.get("type", "")
+                        item_id = action.get("itemInstanceId")
+                        
+                        if error:
+                            # Action gagal
+                            self._rl_action_tracking["success"] = False
+                            if self.ai and hasattr(self.ai, '_update_rl_reward'):
+                                self.ai._update_rl_reward(self.current_game, action_type, False)
+                            logger.debug(f"❌ RL: Action {action_type} failed")
+                        else:
+                            # Action berhasil
+                            self._rl_action_tracking["success"] = True
+                            if self.ai and hasattr(self.ai, '_update_rl_reward'):
+                                self.ai._update_rl_reward(self.current_game, action_type, True)
+                            logger.debug(f"✅ RL: Action {action_type} succeeded")
+
+                    # Track item jika action adalah pickup
                     if action and action.get("type") == "pickup":
                         item_id = action.get("itemInstanceId")
                         if error:
@@ -746,13 +774,13 @@ class Driver:
                 raise
 
     async def _act(self, ws: WSClient, can_act: bool):
-        """Ambil tindakan menggunakan Hybrid AI dengan rate limit protection"""
+        """Ambil tindakan menggunakan Hybrid AI dengan rate limit protection dan RL"""
         if not can_act or not self.current_game or not self.current_game.is_alive:
             return
 
         # ===== RATE LIMIT PROTECTION =====
         current_time = __import__('time').time()
-        min_action_interval = 0.5  # Minimal 0.5 detik antar action
+        min_action_interval = 0.5
         
         if self._last_action_time > 0:
             elapsed = current_time - self._last_action_time
@@ -781,6 +809,12 @@ class Driver:
                 if action:
                     thought = f"Hybrid AI: {decision.reasoning[0] if decision.reasoning else decision.action_type}"
                     logger.info(f"📤 Sending action: {action}")
+                    
+                    # ===== RL TRACKING: Simpan action yang dikirim =====
+                    self._rl_action_tracking["action"] = decision.action_type
+                    self._rl_action_tracking["state"] = self.ai.rl_agent.get_state_features(self.current_game)
+                    self._rl_action_tracking["timestamp"] = __import__('time').time()
+                    
                     await ws.send_action(action, thought=thought)
 
                     if decision.action_type != "wait":
@@ -826,6 +860,14 @@ class Driver:
             conn = self._find_target(target_id, "connections")
             if conn:
                 return ActionBuilder.move(conn)
+        
+        elif action_type == "use":
+            item = self._find_target(target_id, "items")
+            if item:
+                return ActionBuilder.use_item(item)
+            # Jika target_id adalah item_id langsung
+            if target_id:
+                return ActionBuilder.use_item_by_id(target_id)
 
         return None
 
@@ -887,13 +929,27 @@ class Driver:
         logger.info(f"   Explore Priority: {stats.get('explore_priority', 0)}")
         logger.info(f"   Total Actions: {self.total_actions}")
         logger.info(f"   Success Rate: {self.successful_actions / max(self.total_actions, 1) * 100:.1f}%")
+        
+        # ===== RL STATS =====
+        if hasattr(self.ai, 'rl_agent'):
+            rl_stats = self.ai.rl_agent.get_stats()
+            logger.info("-" * 40)
+            logger.info("🧠 Reinforcement Learning Stats")
+            logger.info(f"   Q-Table Size: {rl_stats.get('q_table_size', 0)}")
+            logger.info(f"   Memory Size: {rl_stats.get('memory_size', 0)}")
+            logger.info(f"   Epsilon: {rl_stats.get('epsilon', 0)}")
+            logger.info(f"   Exploration: {rl_stats.get('exploration_actions', 0)}")
+            logger.info(f"   Exploitation: {rl_stats.get('exploitation_actions', 0)}")
+            logger.info(f"   Learning Updates: {rl_stats.get('learning_updates', 0)}")
+            logger.info(f"   Total Reward: {rl_stats.get('total_reward', 0):.2f}")
+        
         logger.info("=" * 60)
 
     def get_performance(self) -> Dict[str, Any]:
         """Dapatkan performa bot"""
         uptime = int(__import__('time').time() - (self.start_time or 0))
 
-        return {
+        result = {
             "uptime": uptime,
             "game_count": self.game_count,
             "total_actions": self.total_actions,
@@ -902,3 +958,9 @@ class Driver:
             "current_state": self.current_game.entry_type if self.current_game else "none",
             "is_in_game": self.current_game is not None and self.current_game.is_alive
         }
+        
+        # ===== RL STATS =====
+        if hasattr(self.ai, 'rl_agent'):
+            result["rl_stats"] = self.ai.rl_agent.get_stats()
+        
+        return result
