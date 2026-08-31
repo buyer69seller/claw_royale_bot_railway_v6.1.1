@@ -3,7 +3,7 @@
 
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Any  # <-- TAMBAHKAN INI
+from typing import Dict, List, Optional, Any
 
 # Base directory
 BASE_DIR = Path(__file__).parent.parent.parent
@@ -73,11 +73,16 @@ DOCS_TO_CACHE = [
     "/references/paid-games.md",
 ]
 
-# AI Constants
+# ===== AI Constants =====
 AI_LEARNING_RATE = 0.1
 AI_CONFIDENCE_THRESHOLD = 0.6
 AI_RISK_THRESHOLD = 0.7
 AI_STRATEGY_SWITCH_INTERVAL = 10
+
+# ===== AUTO-EQUIP Constants (TAMBAHKAN INI) =====
+AUTO_EQUIP_ENABLED = True
+AUTO_EQUIP_INTERVAL_GAMES = 3  # Auto-equip setiap 3 game
+AUTO_EQUIP_ON_STARTUP = True
 
 # ===== PRE-SEASON 1 PACK DATA =====
 
@@ -91,7 +96,7 @@ SUB_CAPABLE_PACKS = [
     "Last Stand", "Iron Heart", "Sunflame Cloak", "Pickpocket"
 ]
 
-PACK_EFFECTS: Dict[str, Dict] = {  # <-- TAMBAHKAN TYPE HINT
+PACK_EFFECTS: Dict[str, Dict] = {
     "Moltz Expert": {
         "description": "Convert weapons/armor to Moltz",
         "main": {"moltz_convert": 1.0},
@@ -205,7 +210,7 @@ RELIC_AFFIX_PRIORITY = {
     "Heal": 2
 }
 
-# ===== FUNCTIONS (TAMBAHKAN INI) =====
+# ===== PACK HELPER FUNCTIONS =====
 
 def get_pack_by_name(name: str) -> Optional[Dict]:
     """Dapatkan data pack berdasarkan nama"""
@@ -225,3 +230,72 @@ def is_main_only_pack(name: str) -> bool:
 def is_sub_capable_pack(name: str) -> bool:
     """Cek apakah pack bisa di Sub slot"""
     return name in SUB_CAPABLE_PACKS
+
+def get_pack_tier_effect(pack_name: str, tier: int, slot: str = "main") -> Dict:
+    """Dapatkan efek pack berdasarkan tier"""
+    base_effect = get_pack_effect(pack_name, slot)
+    if not base_effect:
+        return {}
+    
+    # Tier multiplier (T1 = 1.0, T2 = 0.8, T3 = 0.6)
+    tier_multiplier = {1: 1.0, 2: 0.8, 3: 0.6}.get(tier, 1.0)
+    
+    # Apply tier multiplier to numeric values
+    result = {}
+    for key, value in base_effect.items():
+        if isinstance(value, (int, float)):
+            result[key] = value * tier_multiplier
+        else:
+            result[key] = value
+    
+    return result
+
+def get_pack_recommendation(strategy_type: str = "balanced") -> Dict[str, str]:
+    """
+    Dapatkan rekomendasi pack berdasarkan strategi
+    
+    Args:
+        strategy_type: "survival", "damage", "stealth", "balanced", "economy"
+    
+    Returns:
+        Dict dengan main_pack dan sub_pack
+    """
+    recommendations = {
+        "survival": {
+            "main": "Thorns",
+            "sub": "Heart of the Giant",
+            "description": "Focus on survival and healing"
+        },
+        "damage": {
+            "main": "Berserker",
+            "sub": "Double Attack",
+            "description": "Focus on dealing damage"
+        },
+        "stealth": {
+            "main": "Assassin",
+            "sub": "Pickpocket",
+            "description": "Focus on stealth and stealing"
+        },
+        "balanced": {
+            "main": "Goliath",
+            "sub": "Iron Heart",
+            "description": "Balanced approach"
+        },
+        "economy": {
+            "main": "Item Expert",
+            "sub": "Moltz Expert",
+            "description": "Focus on economy and item ATK"
+        },
+        "ranged": {
+            "main": "Ranged",
+            "sub": "Sword Master",
+            "description": "Focus on ranged combat"
+        },
+        "explore": {
+            "main": "Ruin Expert",
+            "sub": "Scout",
+            "description": "Focus on exploration and ruin farming"
+        }
+    }
+    
+    return recommendations.get(strategy_type, recommendations["balanced"])
