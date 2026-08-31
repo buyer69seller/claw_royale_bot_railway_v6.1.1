@@ -1,5 +1,5 @@
 # src/main.py
-"""Entry point bot Claw Royale dengan Hybrid AI"""
+"""Entry point bot Claw Royale dengan Hybrid AI + Strategy Selector"""
 
 import asyncio
 import logging
@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from .client.rest_client import RestClient
 from .lifecycle.driver import Driver
-from .core.config import API_KEY
+from .core.config import API_KEY, STRATEGY_MODE
 from .utils.logger import setup_logging
 from .services.reward_service import RewardService
 from .services.loadout_service import LoadoutService
@@ -75,11 +75,19 @@ async def main():
 
     logger.info("🦀 Starting Claw Royale Bot v6.1 - Hybrid AI")
     logger.info("=" * 60)
+    
+    # ===== STRATEGY MODE =====
+    logger.info(f"🧠 Strategy Mode: {STRATEGY_MODE.upper()}")
+    if STRATEGY_MODE == "scan_clear":
+        logger.info("   📋 Mode: Scan & Clear - Ambil semua item, bunuh semua musuh")
+    else:
+        logger.info("   📋 Mode: Hybrid AI + RL - Adaptive decision making")
+    logger.info("=" * 60)
 
-    # Init Knowledge Base dengan cleanup
+    # Init Knowledge Base
     knowledge = KnowledgeBase()
     
-    # ===== CLEANUP OLD DATA (BARU) =====
+    # ===== CLEANUP OLD DATA =====
     try:
         removed = knowledge.clear_old_data(days=30)
         if removed > 0:
@@ -96,7 +104,6 @@ async def main():
     logger.info(f"   - Success Rate: {insights['performance']['success_rate']*100:.1f}%")
     logger.info(f"   - Total Games: {insights['total_games']}")
     
-    # ===== TAMBAHKAN: Memory info =====
     if "memory" in insights:
         logger.info(f"   - Memory Usage: {insights['memory']['usage_percent']:.1f}% ({insights['memory']['history_entries']}/{insights['memory']['max_history']} entries)")
     logger.info("=" * 60)
@@ -158,8 +165,12 @@ async def main():
 
         # ===== DRIVER SETUP =====
         logger.info("=" * 60)
-        logger.info("🚀 Starting Hybrid AI Auto-Pilot...")
-        logger.info("🧠 AI Engine: AI Auto-Pilot + Competitive v7")
+        logger.info("🚀 Starting AI Auto-Pilot...")
+        logger.info(f"🧠 Strategy Mode: {STRATEGY_MODE.upper()}")
+        if STRATEGY_MODE == "scan_clear":
+            logger.info("📋 Scan & Clear: Collect all items, clear all enemies")
+        else:
+            logger.info("📋 Hybrid AI: Adaptive + RL decision making")
         logger.info("🎮 Ready to join games...")
         logger.info("=" * 60)
         
@@ -167,6 +178,11 @@ async def main():
         driver = Driver(rest)
         driver.knowledge = knowledge
         driver.auth_service = auth_service
+        
+        # ===== SET STRATEGY MODE =====
+        driver.set_strategy_mode(STRATEGY_MODE)
+        logger.info(f"✅ Strategy mode set to: {STRATEGY_MODE}")
+        
         logger.info("✅ Driver instance created")
         
         if health_server:
@@ -198,7 +214,8 @@ if __name__ == "__main__":
     
     print("=" * 60)
     print("🦀 Claw Royale Bot v6.1 - Hybrid AI")
-    print("🧠 AI Engine: AI Auto-Pilot + Competitive v7")
+    print("🧠 AI Engine: Hybrid AI + RL + Strategy Selector")
+    print(f"📋 Strategy Mode: {STRATEGY_MODE.upper()}")
     print("=" * 60)
     
     loop = asyncio.new_event_loop()
