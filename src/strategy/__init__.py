@@ -4,11 +4,13 @@
 from .engine import StrategyEngine
 from .evaluators import *
 from .scan_clear import ScanClearStrategy
+from .hybrid_strategy import HybridStrategy  # <-- TAMBAHKAN (jika file ada)
+
 
 __all__ = [
     # Main Strategy Engine
     "StrategyEngine",
-    
+    "HybridStrategy",  # <-- TAMBAHKAN
     # Scan & Clear Strategy
     "ScanClearStrategy",
     
