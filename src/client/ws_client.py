@@ -107,7 +107,22 @@ class WSClient:
             return False
         import time
         return (time.time() - self._connected_at) >= 10.0
-    
+        
+    # src/client/ws_client.py - tambahkan reconnect logic
+
+    async def connect_with_retry(self, max_retries: int = 5) -> bool:
+        """Connect dengan retry mechanism"""
+        retries = 0
+        while retries < max_retries:
+            try:
+                await self.connect()
+                return True
+            except Exception as e:
+                retries += 1
+                wait_time = min(2 ** retries, 30)
+                logger.warning(f"Connection failed ({retries}/{max_retries}), waiting {wait_time}s: {e}")
+                await asyncio.sleep(wait_time)
+        return False
     # Alias untuk kompatibilitas
     async def receive(self) -> Dict:
         """Alias untuk recv"""
