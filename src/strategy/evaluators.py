@@ -86,3 +86,77 @@ def move_score(connection: Dict, in_cave: bool = False) -> float:
         if connection.get("insideDeathZone") is True:
             score -= 1000
     return score
+
+# src/strategy/evaluators.py - tambahkan di akhir file
+
+from ..core.constants import PACK_EFFECTS
+
+def get_pack_strategy_modifier(pack_name: str, slot: str = "main") -> Dict[str, Any]:
+    """Dapatkan modifier strategi berdasarkan pack"""
+    effects = PACK_EFFECTS.get(pack_name, {})
+    
+    if slot == "main":
+        effect = effects.get("main", {})
+    else:
+        effect = effects.get("sub", {})
+    
+    if not effect:
+        return {}
+    
+    modifiers = {}
+    
+    # Thorns: lebih defensif
+    if "dmg_reduction" in effect:
+        modifiers["defensive"] = True
+        modifiers["survival_priority"] = 2.0
+    
+    # Berserker: lebih agresif saat HP rendah
+    if "berserker_dmg" in effect:
+        modifiers["aggressive_low_hp"] = True
+    
+    # Heart of Giant: prioritaskan healing
+    if "heal_bonus" in effect:
+        modifiers["heal_priority"] = 2.0
+    
+    # Ranged: jaga jarak
+    if "range_bonus" in effect:
+        modifiers["keep_distance"] = True
+    
+    # Assassin: stealth
+    if "stealth" in effect:
+        modifiers["avoid_detection"] = True
+    
+    return modifiers
+
+def apply_pack_modifiers(decision: Dict, modifiers: Dict) -> Dict:
+    """Terapkan modifier pada keputusan"""
+    if not modifiers:
+        return decision
+    
+    modified = dict(decision)
+    
+    # Defensive: prioritaskan survival
+    if modifiers.get("defensive"):
+        if modified.get("kind") in ["attack", "explore"]:
+            modified["score"] *= 0.7
+    
+    # Aggressive low HP
+    if modifiers.get("aggressive_low_hp"):
+        # Tidak ada perubahan, strategy akan menangani
+        pass
+    
+    # Heal priority
+    if modifiers.get("heal_priority", 1.0) > 1.0:
+        if modified.get("kind") == "pickup":
+            # Prioritaskan healing items
+            heal = modified.get("obj", {}).get("heal", 0)
+            if heal > 0:
+                modified["score"] *= modifiers["heal_priority"]
+    
+    # Keep distance
+    if modifiers.get("keep_distance"):
+        if modified.get("kind") == "attack":
+            # Hanya attack jika jarak aman
+            modified["score"] *= 0.8
+    
+    return modified
