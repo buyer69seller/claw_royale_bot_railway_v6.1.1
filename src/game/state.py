@@ -41,7 +41,47 @@ class GameState:
     # Rejected action tracking
     rejected_count: int = 0
     last_rejected_action: Optional[str] = None
+    # src/game/state.py - tambahkan di GameState
+
+    # ===== INVENTORY TRACKING (BARU) =====
+    inventory_items: Dict[str, Dict] = field(default_factory=dict)  # Item yang dimiliki
+    equipped_items: Dict[str, str] = field(default_factory=dict)   # slot -> item_id
     
+    def add_to_inventory(self, item: Dict):
+        """Tambahkan item ke inventory"""
+        item_id = item.get("instanceId") or item.get("id")
+        if item_id:
+            self.inventory_items[item_id] = item
+            logger.debug(f"📦 Added to inventory: {item_id[:8]}")
+    
+    def remove_from_inventory(self, item_id: str):
+        """Hapus item dari inventory"""
+        if item_id in self.inventory_items:
+            del self.inventory_items[item_id]
+            logger.debug(f"🗑️ Removed from inventory: {item_id[:8]}")
+    
+    def get_healing_items_inventory(self) -> List[Dict]:
+        """Dapatkan item healing dari inventory"""
+        healing_items = []
+        for item in self.inventory_items.values():
+            heal = float(item.get("heal", item.get("healAmount", 0)))
+            if heal > 0:
+                healing_items.append(item)
+        return healing_items
+    
+    def get_best_healing_item(self) -> Optional[Dict]:
+        """Dapatkan item healing terbaik dari inventory"""
+        items = self.get_healing_items_inventory()
+        if not items:
+            return None
+        # Sort by heal amount (terbesar dulu)
+        items.sort(key=lambda x: float(x.get("heal", x.get("healAmount", 0))), reverse=True)
+        return items[0]
+    
+    def has_healing_items(self) -> bool:
+        """Cek apakah ada item healing di inventory"""
+        return len(self.get_healing_items_inventory()) > 0
+        
     # ===== ITEM TRACKING (BARU) =====
     attempted_items: Set[str] = field(default_factory=set)
     collected_items: Set[str] = field(default_factory=set)
