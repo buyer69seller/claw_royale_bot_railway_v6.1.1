@@ -1,5 +1,5 @@
 # src/strategy/engine.py
-"""Strategy engine (fallback untuk AI) - dengan perbaikan handling data"""
+"""Strategy engine (fallback untuk AI) - dengan visited region tracking"""
 
 import logging
 from typing import Dict, List, Any, Optional
@@ -9,15 +9,16 @@ from ..game.actions import ActionBuilder
 from .evaluators import (
     heal_score, combat_score, loot_score, 
     interact_score, explore_score, move_score,
-    alive
+    alive, get_pack_strategy_modifier, apply_pack_modifiers
 )
 from ..core.constants import SCORE_CAVE_EXIT
 from ..core.exceptions import ClawRoyaleError
 
 logger = logging.getLogger(__name__)
 
+
 class StrategyEngine:
-    """Engine untuk mengambil keputusan (fallback) dengan handling data robust"""
+    """Engine untuk mengambil keputusan (fallback) dengan visited region tracking"""
     
     def __init__(self):
         self.turn = 0
@@ -34,13 +35,11 @@ class StrategyEngine:
         
         if main_pack:
             main_name = main_pack.get("name", "")
-            from .evaluators import get_pack_strategy_modifier
             modifiers = get_pack_strategy_modifier(main_name, "main")
             self._pack_modifiers.update(modifiers)
         
         if sub_pack:
             sub_name = sub_pack.get("name", "")
-            from .evaluators import get_pack_strategy_modifier
             modifiers = get_pack_strategy_modifier(sub_name, "sub")
             for key, value in modifiers.items():
                 if isinstance(value, (int, float)):
@@ -51,10 +50,94 @@ class StrategyEngine:
         if self._pack_modifiers:
             logger.debug(f"📦 Pack modifiers: {self._pack_modifiers}")
     
+    def decide_move(self, state: GameState) -> Optional[Dict]:
+        """
+        Pilih region tujuan dengan mempertimbangkan:
+        1. Hindari death zone
+        2. Prioritaskan region belum dikunjungi
+        3. Hindari region yang sudah terlalu sering dikunjungi
+        4. Pilih safety tertinggi
+        """
+        connections = state.get_connections()
+        
+        if not connections:
+            logger.debug("📭 No connections available")
+            return None
+        
+        # Log semua connections
+        logger.info(f"🗺️ Found {len(connections)} connections:")
+        for i, conn in enumerate(connections, 1):
+            if isinstance(conn, str):
+                conn = {"regionId": conn, "insideDeathZone": False, "safetyScore": 0.5}
+            elif not isinstance(conn, dict):
+                continue
+            
+            region_id = conn.get("regionId", "unknown")
+            safety = conn.get("safetyScore", 0)
+            death = "⚠️ DEATH ZONE" if conn.get("insideDeathZone", False) else "✅ Safe"
+            visited = "🔁 Visited" if state.is_region_visited(region_id) else "🆕 New"
+            count = state.get_region_visit_count(region_id)
+            logger.info(f"   {i}. {region_id[:8]} - safety:{safety:.2f} {death} {visited} (x{count})")
+        
+        # Filter: Hindari death zone
+        safe_connections = []
+        for conn in connections:
+            if isinstance(conn, str):
+                conn = {"regionId": conn, "insideDeathZone": False, "safetyScore": 0.5}
+            elif not isinstance(conn, dict):
+                continue
+            
+            if not conn.get("insideDeathZone", False):
+                safe_connections.append(conn)
+        
+        if not safe_connections:
+            logger.warning("⚠️ All connections are death zones!")
+            return None
+        
+        # ===== PRIORITAS 1: UNVISITED REGION =====
+        unvisited = []
+        for conn in safe_connections:
+            region_id = conn.get("regionId")
+            if region_id and not state.is_region_visited(region_id):
+                unvisited.append(conn)
+        
+        if unvisited:
+            logger.info(f"🎯 Found {len(unvisited)} unvisited regions")
+            # Pilih unvisited dengan safety tertinggi
+            best = max(unvisited, key=lambda c: c.get("safetyScore", 0))
+            region_id = best.get("regionId", "unknown")
+            safety = best.get("safetyScore", 0)
+            logger.info(f"✅ Moving to unvisited region: {region_id[:8]} (safety: {safety:.2f})")
+            return best
+        
+        # ===== PRIORITAS 2: LOW VISIT COUNT (< 2) =====
+        low_visit = []
+        for conn in safe_connections:
+            region_id = conn.get("regionId")
+            if region_id and state.get_region_visit_count(region_id) < 2:
+                low_visit.append(conn)
+        
+        if low_visit:
+            logger.info(f"🎯 Found {len(low_visit)} low-visit regions")
+            best = max(low_visit, key=lambda c: c.get("safetyScore", 0))
+            region_id = best.get("regionId", "unknown")
+            safety = best.get("safetyScore", 0)
+            logger.info(f"✅ Moving to low-visit region: {region_id[:8]} (safety: {safety:.2f})")
+            return best
+        
+        # ===== PRIORITAS 3: HIGHEST SAFETY =====
+        logger.info("🎯 All regions visited, choosing highest safety")
+        best = max(safe_connections, key=lambda c: c.get("safetyScore", 0))
+        region_id = best.get("regionId", "unknown")
+        safety = best.get("safetyScore", 0)
+        visit_count = state.get_region_visit_count(region_id)
+        logger.info(f"✅ Moving to safest region: {region_id[:8]} (safety: {safety:.2f}, visited: {visit_count}x)")
+        return best
+    
     def decide(self, state: GameState) -> Dict:
         """
         Ambil keputusan berdasarkan state game
-        Dengan handling data yang robust
+        Dengan visited region tracking
         """
         self.turn += 1
         
@@ -104,7 +187,6 @@ class StrategyEngine:
         if hp_ratio < 0.2:
             try:
                 for conn in state.get_connections():
-                    # ===== FIX: Handle jika conn adalah string =====
                     if isinstance(conn, str):
                         conn = {"regionId": conn, "insideDeathZone": False, "safetyScore": 0.5}
                     elif not isinstance(conn, dict):
@@ -191,18 +273,13 @@ class StrategyEngine:
             except Exception as e:
                 logger.debug(f"Explore error: {e}")
         
-        # === 7. MOVE (FALLBACK) ===
+        # === 7. MOVE (FALLBACK) - DENGAN VISITED TRACKING ===
         try:
-            for conn in state.get_connections():
-                # ===== FIX: Handle jika conn adalah string =====
-                if isinstance(conn, str):
-                    conn = {"regionId": conn, "insideDeathZone": False, "safetyScore": 0.5}
-                elif not isinstance(conn, dict):
-                    continue
-                
-                score = move_score(conn, state.in_cave)
+            best_connection = self.decide_move(state)
+            if best_connection:
+                score = move_score(best_connection, state.in_cave)
                 if score > 0:
-                    candidates.append({"kind": "move", "obj": conn, "score": score})
+                    candidates.append({"kind": "move", "obj": best_connection, "score": score})
         except Exception as e:
             logger.debug(f"Move error: {e}")
         
@@ -232,6 +309,9 @@ class StrategyEngine:
         # ===== Apply pack modifiers =====
         if self._pack_modifiers:
             best = self._apply_pack_modifiers(best)
+        
+        # Log keputusan
+        logger.info(f"📊 Turn {self.turn}: {best['kind']} (score: {best['score']:.0f})")
         
         return best
     
@@ -279,7 +359,6 @@ class StrategyEngine:
         elif kind == "explore":
             return self.action_builder.explore(obj)
         elif kind == "move":
-            # ===== FIX: Handle jika obj adalah string =====
             if isinstance(obj, str):
                 return self.action_builder.move({"regionId": obj})
             return self.action_builder.move(obj)
