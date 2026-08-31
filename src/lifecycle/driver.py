@@ -347,8 +347,10 @@ class Driver:
                             "survival_time": self.current_game.survival_time
                         })
                     self._log_hybrid_stats()
+                    
+                    # ===== TAMBAHKAN: LOG UNTUK DEBUG =====
+                    logger.info("🔄 Game ended, exiting gameplay loop...")
                     break
-
                 # ===== CAN_ACT =====
                 if msg_type == "can_act_changed":
                     self.current_game.can_act = bool(msg.get("canAct"))
