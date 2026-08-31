@@ -102,6 +102,135 @@ class HealthServer:
                 logger.debug(f"Failed to get driver metrics: {e}")
         
         return web.json_response(metrics)
+
+# src/utils/health.py - tambahkan method _dashboard_handler
+
+    async def _dashboard_handler(self, request):
+        """Dashboard endpoint - human readable performance"""
+        uptime = int(time.time() - self._start_time)
+        hours = uptime // 3600
+        minutes = (uptime % 3600) // 60
+        seconds = uptime % 60
+        
+        dashboard = {
+            "bot": {
+                "status": "🟢 Running",
+                "uptime": f"{hours}h {minutes}m {seconds}s",
+                "version": "6.1.0",
+                "engine": "Hybrid AI (AI + Competitive v7)"
+            }
+        }
+        
+        if self._driver_ref:
+            try:
+                perf = self._driver_ref.get_performance() if hasattr(self._driver_ref, 'get_performance') else {}
+                
+                dashboard["game"] = {
+                    "games_played": perf.get("game_count", 0),
+                    "total_actions": perf.get("total_actions", 0),
+                    "success_rate": f"{perf.get('success_rate', 0) * 100:.1f}%",
+                    "is_in_game": "✅ Yes" if perf.get("is_in_game", False) else "❌ No",
+                    "current_state": perf.get("current_state", "none")
+                }
+                
+                hybrid_stats = perf.get("hybrid_stats", {})
+                if hybrid_stats:
+                    dashboard["hybrid_ai"] = {
+                        "total_decisions": hybrid_stats.get("decisions_made", 0),
+                        "ai_decisions": hybrid_stats.get("ai_decisions", 0),
+                        "heuristic_decisions": hybrid_stats.get("heuristic_decisions", 0),
+                        "survival": hybrid_stats.get("survival_priority", 0),
+                        "kill": hybrid_stats.get("kill_priority", 0),
+                        "loot": hybrid_stats.get("loot_priority", 0),
+                        "explore": hybrid_stats.get("explore_priority", 0)
+                    }
+            except Exception as e:
+                dashboard["error"] = str(e)
+        
+        # Format as HTML for browser
+        html = self._format_dashboard_html(dashboard)
+        return web.Response(text=html, content_type="text/html")
+    
+    def _format_dashboard_html(self, data: Dict) -> str:
+        """Format dashboard as HTML"""
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Claw Royale Bot - Dashboard</title>
+            <style>
+                body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
+                .container { max-width: 800px; margin: 0 auto; }
+                .card { background: #16213e; border-radius: 10px; padding: 20px; margin: 10px 0; border-left: 4px solid #0f3460; }
+                .card h2 { margin: 0 0 10px 0; color: #e94560; }
+                .stat { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #1a1a3e; }
+                .stat .label { color: #aaa; }
+                .stat .value { color: #fff; font-weight: bold; }
+                .green { color: #4ade80; }
+                .yellow { color: #facc15; }
+                .red { color: #f87171; }
+                .header { text-align: center; padding: 20px 0; }
+                .header h1 { color: #e94560; margin: 0; }
+                .header p { color: #888; margin: 5px 0; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🦀 Claw Royale Bot</h1>
+                    <p>v6.1 - Hybrid AI Engine</p>
+                </div>
+        """
+        
+        # Bot status
+        bot = data.get("bot", {})
+        html += f"""
+                <div class="card">
+                    <h2>🤖 Bot Status</h2>
+                    <div class="stat"><span class="label">Status</span><span class="value green">{bot.get('status', 'Unknown')}</span></div>
+                    <div class="stat"><span class="label">Uptime</span><span class="value">{bot.get('uptime', 'N/A')}</span></div>
+                    <div class="stat"><span class="label">Version</span><span class="value">{bot.get('version', 'N/A')}</span></div>
+                    <div class="stat"><span class="label">Engine</span><span class="value">{bot.get('engine', 'N/A')}</span></div>
+                </div>
+        """
+        
+        # Game stats
+        game = data.get("game", {})
+        if game:
+            html += f"""
+                <div class="card">
+                    <h2>🎮 Game Stats</h2>
+                    <div class="stat"><span class="label">Games Played</span><span class="value">{game.get('games_played', 0)}</span></div>
+                    <div class="stat"><span class="label">Total Actions</span><span class="value">{game.get('total_actions', 0)}</span></div>
+                    <div class="stat"><span class="label">Success Rate</span><span class="value green">{game.get('success_rate', '0%')}</span></div>
+                    <div class="stat"><span class="label">In Game</span><span class="value">{game.get('is_in_game', 'No')}</span></div>
+                    <div class="stat"><span class="label">Current State</span><span class="value">{game.get('current_state', 'N/A')}</span></div>
+                </div>
+            """
+        
+        # Hybrid AI stats
+        hybrid = data.get("hybrid_ai", {})
+        if hybrid:
+            html += f"""
+                <div class="card">
+                    <h2>🧠 Hybrid AI</h2>
+                    <div class="stat"><span class="label">Total Decisions</span><span class="value">{hybrid.get('total_decisions', 0)}</span></div>
+                    <div class="stat"><span class="label">AI Decisions</span><span class="value green">{hybrid.get('ai_decisions', 0)}</span></div>
+                    <div class="stat"><span class="label">Heuristic Decisions</span><span class="value yellow">{hybrid.get('heuristic_decisions', 0)}</span></div>
+                    <div class="stat"><span class="label">🛡️ Survival</span><span class="value">{hybrid.get('survival', 0)}</span></div>
+                    <div class="stat"><span class="label">⚔️ Kill</span><span class="value red">{hybrid.get('kill', 0)}</span></div>
+                    <div class="stat"><span class="label">📦 Loot</span><span class="value">{hybrid.get('loot', 0)}</span></div>
+                    <div class="stat"><span class="label">🔍 Explore</span><span class="value">{hybrid.get('explore', 0)}</span></div>
+                </div>
+            """
+        
+        html += """
+            </div>
+        </body>
+        </html>
+        """
+        
+        return html
     
     async def _stats_handler(self, request):
         """Stats endpoint - human readable"""
