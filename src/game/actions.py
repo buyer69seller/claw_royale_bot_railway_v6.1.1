@@ -46,7 +46,21 @@ class ActionBuilder:
         if not region_id:
             return None
         return {"type": "move", "regionId": region_id}
+# src/game/actions.py - tambahkan method ini
 
+    @staticmethod
+    def use_item(item: Dict) -> Optional[Dict]:
+        """Build action use item (heal)"""
+        if not item:
+            return None
+        
+        item_id = item.get("instanceId") or item.get("id")
+        if not item_id:
+            logger.warning("Cannot use item: no item id found")
+            return None
+        
+        return {"type": "use", "itemInstanceId": item_id}
+        
 # src/game/actions.py - tambahkan method use_item
 
     @staticmethod
