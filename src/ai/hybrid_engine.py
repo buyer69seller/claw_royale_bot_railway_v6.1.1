@@ -1,5 +1,5 @@
 # src/ai/hybrid_engine.py
-"""Hybrid AI Engine - Gabungan AI Auto-Pilot + Competitive v7 dengan Item Tracking & Memory Stats"""
+"""Hybrid AI Engine - Gabungan AI Auto-Pilot + Competitive v7 dengan Item Tracking"""
 
 import logging
 import math
@@ -29,8 +29,6 @@ class ThreatAssessment:
     is_safe: bool
     should_fight: bool
     should_flee: bool
-    guardian_nearby: bool = False
-    guardian_distance: float = 999.0
 
 
 @dataclass
@@ -49,7 +47,7 @@ class HybridAIEngine:
     1. AI Auto-Pilot (ML/Neural)
     2. Competitive v7 (Heuristic/Priority)
     3. Item Tracking & Validation
-    4. Memory Stats Monitoring
+    4. Decision Cache untuk performa
     """
     
     def __init__(self):
@@ -73,32 +71,59 @@ class HybridAIEngine:
             "explore_priority": 0
         }
         
-        # ===== MEMORY STATS TRACKING =====
-        self._last_memory_log_turn = 0
-        self._memory_log_interval = 50  # Log setiap 50 turn
-        
-        # Decision cache untuk optimasi
-        self._decision_cache = {}
+        # ===== OPTIMASI: Decision Cache =====
+        self._decision_cache: Dict[int, AIDecision] = {}
         self._cache_hits = 0
         self._cache_misses = 0
-    
+        self._max_cache_size = 50
+        self._last_hp = 0
+        self._last_turn = 0
+        
+        # ===== OPTIMASI: Pre-filtered data =====
+        self._cached_nearby_items: List[tuple] = []
+        self._cached_enemies: List[Dict] = []
+        
     async def decide(self, state: GameState) -> AIDecision:
         """
-        Hybrid decision making:
-        1. AI Analysis (ML-based)
-        2. Threat Assessment (v7)
-        3. Priority-based selection (v7) dengan Item Tracking
-        4. Final decision (AI + Heuristic)
-        5. Memory Stats Monitoring
+        Hybrid decision making dengan cache
         """
         self.turn += 1
         
-        # ===== CACHE CHECK =====
-        view_hash = hash(str(state.view.get("self", {})) + str(state.turn))
-        if view_hash in self._decision_cache:
-            self._cache_hits += 1
-            return self._decision_cache[view_hash]
+        # ===== OPTIMASI: Early exit jika HP sangat rendah =====
+        hp_ratio = state.hp_ratio()
+        if hp_ratio < 0.15:
+            # Critical HP - langsung cari healing
+            healing_items = state.get_healing_items()
+            for item in healing_items[:3]:
+                heal = float(item.get("heal", item.get("healAmount", 0)))
+                if heal > 0:
+                    distance = state._calculate_distance(state.get_self(), item)
+                    if distance < 3:
+                        item_id = item.get("instanceId") or item.get("id")
+                        if item_id:
+                            state.mark_item_attempted(item_id)
+                            logger.info(f"⚡ CRITICAL HP ({hp_ratio:.0%}) - emergency heal!")
+                            return AIDecision(
+                                action_type="pickup",
+                                target_id=item_id,
+                                confidence=0.98,
+                                reasoning=[f"Critical HP ({hp_ratio:.0%}) - emergency healing"],
+                                risk_score=0.05,
+                                expected_value=1.0
+                            )
+        
+        # ===== OPTIMASI: Cache check =====
+        # Cached decisions are valid for 1 turn only, and only if HP hasn't changed much
+        if self.turn > 1 and self.turn == self._last_turn + 1:
+            hp_changed = abs(hp_ratio - self._last_hp) < 0.05
+            cached = self._decision_cache.get(self.turn - 1)
+            if cached and hp_changed:
+                self._cache_hits += 1
+                return cached
+        
         self._cache_misses += 1
+        self._last_hp = hp_ratio
+        self._last_turn = self.turn
         
         # Step 1: AI Perception
         perceived = self.perception.perceive(state)
@@ -124,12 +149,6 @@ class HybridAIEngine:
             threat
         )
         
-        # ===== CACHE STORE =====
-        if len(self._decision_cache) > 100:
-            # Limit cache size
-            self._decision_cache.clear()
-        self._decision_cache[view_hash] = final_decision
-        
         # Update stats
         self.stats["decisions_made"] += 1
         if final_decision.confidence > 0.6:
@@ -137,36 +156,30 @@ class HybridAIEngine:
         else:
             self.stats["heuristic_decisions"] += 1
         
-        # ===== LOG ITEM STATS PERIODIK =====
+        # Log item stats periodically
         if self.turn % 10 == 0:
             try:
                 item_stats = state.get_item_stats()
                 logger.debug(f"📊 Item Stats: {item_stats}")
-            except Exception as e:
-                logger.debug(f"Item stats error: {e}")
+            except Exception:
+                pass
         
-        # ===== LOG MEMORY STATS PERIODIK =====
-        if self.turn - self._last_memory_log_turn >= self._memory_log_interval:
-            self._last_memory_log_turn = self.turn
-            try:
-                mem_stats = self.knowledge.get_memory_stats()
-                cache_stats = {
-                    "cache_size": len(self._decision_cache),
-                    "cache_hits": self._cache_hits,
-                    "cache_misses": self._cache_misses,
-                    "hit_rate": self._cache_hits / max(self._cache_hits + self._cache_misses, 1) * 100
-                }
-                logger.info(f"🧠 Memory Stats: {mem_stats}")
-                logger.info(f"💾 Cache Stats: {cache_stats}")
-            except Exception as e:
-                logger.debug(f"Memory stats error: {e}")
-        
+        # Log keputusan
         logger.info(
             f"🧠 Hybrid AI: {final_decision.action_type} "
             f"(Priority: {priority_decision.priority}, "
             f"Conf: {final_decision.confidence:.2f}, "
             f"Risk: {threat['risk_score']:.2f})"
         )
+        
+        # ===== OPTIMASI: Update cache =====
+        if len(self._decision_cache) > self._max_cache_size:
+            # Remove oldest entries
+            oldest_keys = sorted(self._decision_cache.keys())[:10]
+            for key in oldest_keys:
+                del self._decision_cache[key]
+        
+        self._decision_cache[self.turn] = final_decision
         
         return final_decision
     
@@ -200,6 +213,12 @@ class HybridAIEngine:
             enemies = state.get_enemies()
             valid_enemies = [e for e in enemies if isinstance(e, dict)]
             
+            # ===== OPTIMASI: Limited enemies for threat =====
+            if len(valid_enemies) > 8:
+                # Sort by distance, take closest
+                valid_enemies.sort(key=lambda e: state._calculate_distance(me, e))
+                valid_enemies = valid_enemies[:8]
+            
             # Guardian detection
             guardian_nearby = False
             guardian_distance = 999.0
@@ -210,7 +229,6 @@ class HybridAIEngine:
                     dist = self._distance(me, enemy)
                     if dist < guardian_distance:
                         guardian_distance = dist
-                        logger.debug(f"🛡️ Guardian detected at distance: {dist:.1f}")
             
             threat["guardian_nearby"] = guardian_nearby
             threat["guardian_distance"] = guardian_distance
@@ -219,22 +237,30 @@ class HybridAIEngine:
                 threat["risk_score"] += 0.3 * (1 - guardian_distance / 15)
                 threat["should_flee"] = True
                 threat["should_fight"] = False
-                logger.info(f"🛡️ Guardian nearby ({guardian_distance:.1f}m) - fleeing!")
             
             if valid_enemies:
+                # Take closest enemy
                 closest = min(valid_enemies, key=lambda e: self._distance(me, e))
                 target_hp = float(closest.get("hp", 0))
                 target_max_hp = float(closest.get("maxHp", 1))
                 target_atk = float(closest.get("attack", closest.get("atk", 0)))
                 target_def = float(closest.get("defense", closest.get("def", 0)))
                 
+                # Kill probability
                 threat["kill_probability"] = max(0, min(1, (my_atk - target_def) / max(target_hp, 1)))
+                
+                # Damage received
                 turns_to_kill = target_hp / max(my_atk - target_def, 1)
                 threat["damage_received"] = (target_atk - my_def) * turns_to_kill
+                
+                # Survival chance
                 threat["survival_chance"] = max(0, min(1, 1 - (threat["damage_received"] / max(my_hp, 1))))
+                
+                # Escape chance
                 enemy_density = len(valid_enemies)
                 threat["escape_chance"] = max(0, min(1, 1 - (enemy_density / 10)))
                 
+                # Should fight?
                 threat["should_fight"] = (
                     hp_ratio > 0.5 and 
                     threat["kill_probability"] > 0.6 and
@@ -242,6 +268,7 @@ class HybridAIEngine:
                     not guardian_nearby
                 )
                 
+                # Should flee?
                 threat["should_flee"] = (
                     hp_ratio < 0.3 or
                     threat["survival_chance"] < 0.5 or
@@ -271,7 +298,7 @@ class HybridAIEngine:
     
     async def _priority_decision(self, perceived: PerceivedState, state: GameState, threat: Dict) -> PriorityDecision:
         """
-        v7 Priority-based decision dengan Item Tracking
+        v7 Priority-based decision dengan optimasi loop
         """
         
         try:
@@ -284,6 +311,21 @@ class HybridAIEngine:
             hp_ratio = my_hp / max(my_max_hp, 1)
             alert = state.get_region().get("alertGauge", 0)
             my_atk = float(me.get("attack", me.get("atk", 0)))
+            
+            # ===== OPTIMASI: Pre-filter items by distance =====
+            all_items = state.get_items()
+            nearby_items = []
+            self_pos = state.get_self()
+            
+            # Only process first 20 items (most relevant)
+            for item in all_items[:20]:
+                if isinstance(item, dict):
+                    distance = state._calculate_distance(self_pos, item)
+                    if distance < 5:  # Only consider nearby items
+                        nearby_items.append((item, distance))
+            
+            # Sort by distance
+            nearby_items.sort(key=lambda x: x[1])
             
             # === PRIORITY 1: SURVIVAL ===
             
@@ -308,67 +350,58 @@ class HybridAIEngine:
             
             # HP < 40% → CARI HEALING ITEM DI GROUND
             if hp_ratio < 0.4:
-                try:
-                    healing_items = state.get_healing_items()
-                    for item in healing_items:
-                        if not isinstance(item, dict):
-                            continue
-                        heal = float(item.get("heal", item.get("healAmount", 0)))
-                        if heal > 0:
-                            distance = state._calculate_distance(state.get_self(), item)
-                            if distance < 3:
-                                self.stats["survival_priority"] += 1
-                                item_id = item.get("instanceId") or item.get("id")
-                                if item_id:
-                                    state.mark_item_attempted(item_id)
-                                    return PriorityDecision(
-                                        priority=1,
-                                        action_type="pickup",
-                                        target_id=item_id,
-                                        reasoning=f"Pickup healing ({heal} HP) - HP: {hp_ratio:.0%}",
-                                        confidence=0.95
-                                    )
-                except Exception as e:
-                    logger.debug(f"Healing items error: {e}")
+                for item, distance in nearby_items[:5]:
+                    if not isinstance(item, dict):
+                        continue
+                    heal = float(item.get("heal", item.get("healAmount", 0)))
+                    if heal > 0:
+                        self.stats["survival_priority"] += 1
+                        item_id = item.get("instanceId") or item.get("id")
+                        if item_id:
+                            state.mark_item_attempted(item_id)
+                            return PriorityDecision(
+                                priority=1,
+                                action_type="pickup",
+                                target_id=item_id,
+                                reasoning=f"Pickup healing ({heal} HP) - HP: {hp_ratio:.0%}",
+                                confidence=0.95
+                            )
             
             # HP < 20% → RETREAT
             if hp_ratio < 0.2:
                 self.stats["survival_priority"] += 1
-                try:
-                    for conn in state.get_connections():
-                        if isinstance(conn, dict) and not conn.get("insideDeathZone", False):
-                            return PriorityDecision(
-                                priority=1,
-                                action_type="move",
-                                target_id=conn.get("regionId"),
-                                reasoning=f"Critical HP ({hp_ratio:.0%}) - retreating",
-                                confidence=0.9
-                            )
-                except Exception as e:
-                    pass
+                connections = state.get_connections()
+                for conn in connections[:5]:  # Only check first 5
+                    if isinstance(conn, dict) and not conn.get("insideDeathZone", False):
+                        return PriorityDecision(
+                            priority=1,
+                            action_type="move",
+                            target_id=conn.get("regionId"),
+                            reasoning=f"Critical HP ({hp_ratio:.0%}) - retreating",
+                            confidence=0.9
+                        )
             
             # In Cave → EXIT
             if state.in_cave:
-                try:
-                    for obj in state.get_interactables():
-                        if isinstance(obj, dict) and obj.get("isExit", False) and "cave" in str(obj.get("type", "")):
-                            self.stats["survival_priority"] += 1
-                            return PriorityDecision(
-                                priority=1,
-                                action_type="interact",
-                                target_id=obj.get("interactableId") or obj.get("id"),
-                                reasoning="Exiting cave",
-                                confidence=0.95
-                            )
-                except Exception as e:
-                    pass
+                interactables = state.get_interactables()
+                for obj in interactables[:5]:
+                    if isinstance(obj, dict) and obj.get("isExit", False) and "cave" in str(obj.get("type", "")):
+                        self.stats["survival_priority"] += 1
+                        return PriorityDecision(
+                            priority=1,
+                            action_type="interact",
+                            target_id=obj.get("interactableId") or obj.get("id"),
+                            reasoning="Exiting cave",
+                            confidence=0.95
+                        )
             
             # In Death Zone → MOVE TO CENTER
             try:
                 region = state.get_region()
                 if isinstance(region, dict) and region.get("insideDeathZone", False):
                     self.stats["survival_priority"] += 1
-                    for conn in state.get_connections():
+                    connections = state.get_connections()
+                    for conn in connections[:5]:
                         if isinstance(conn, dict) and not conn.get("insideDeathZone", False):
                             return PriorityDecision(
                                 priority=1,
@@ -377,151 +410,126 @@ class HybridAIEngine:
                                 reasoning="Escaping death zone",
                                 confidence=0.9
                             )
-            except Exception as e:
+            except Exception:
                 pass
             
             # Alert > 7 → HIDE / RETREAT
             if alert > 7:
                 self.stats["survival_priority"] += 1
-                try:
-                    for conn in state.get_connections():
-                        if isinstance(conn, dict) and conn.get("safetyScore", 0) > 0.5:
-                            return PriorityDecision(
-                                priority=1,
-                                action_type="move",
-                                target_id=conn.get("regionId"),
-                                reasoning=f"High alert ({alert}) - moving to safety",
-                                confidence=0.85
-                            )
-                except Exception as e:
-                    pass
+                connections = state.get_connections()
+                for conn in connections[:5]:
+                    if isinstance(conn, dict) and conn.get("safetyScore", 0) > 0.5:
+                        return PriorityDecision(
+                            priority=1,
+                            action_type="move",
+                            target_id=conn.get("regionId"),
+                            reasoning=f"High alert ({alert}) - moving to safety",
+                            confidence=0.85
+                        )
             
             # === PRIORITY 2: LOOT ===
             
-            try:
-                loot_items = state.get_loot_items()
-                for item in loot_items:
-                    if not isinstance(item, dict):
-                        continue
-                    distance = self._distance(state.get_self(), item)
-                    if distance < 3:
-                        self.stats["loot_priority"] += 1
-                        item_id = item.get("instanceId") or item.get("id")
-                        if item_id:
-                            state.mark_item_attempted(item_id)
-                            return PriorityDecision(
-                                priority=2,
-                                action_type="pickup",
-                                target_id=item_id,
-                                reasoning="Collecting loot",
-                                confidence=0.8
-                            )
-            except Exception as e:
-                pass
-            
-            # Move to items in range (distance < 5)
-            for item in loot_items:
-                distance = self._distance(state.get_self(), item)
-                if distance < 5 and threat["risk_score"] < 0.4:
-                    self.stats["loot_priority"] += 1
+            # Collect items in range (from nearby_items)
+            for item, distance in nearby_items[:8]:
+                if not isinstance(item, dict):
+                    continue
+                self.stats["loot_priority"] += 1
+                item_id = item.get("instanceId") or item.get("id")
+                if item_id:
+                    state.mark_item_attempted(item_id)
                     return PriorityDecision(
                         priority=2,
-                        action_type="move",
-                        target_id=item.get("regionId"),
-                        reasoning="Moving to collect item",
-                        confidence=0.7
+                        action_type="pickup",
+                        target_id=item_id,
+                        reasoning="Collecting loot",
+                        confidence=0.8
                     )
             
             # === PRIORITY 3: KILL ===
             
             if hp_ratio > 0.5 and threat.get("should_fight", False):
-                try:
-                    enemies = state.get_enemies()
-                    if enemies:
-                        targetable = []
-                        for e in enemies:
-                            if not isinstance(e, dict):
-                                continue
-                            dist = self._distance(state.get_self(), e)
-                            if dist < 10:
-                                targetable.append(e)
+                enemies = state.get_enemies()
+                if enemies:
+                    # Get targetable enemies (within range)
+                    targetable = []
+                    self_pos = state.get_self()
+                    for e in enemies[:10]:  # Limit to 10 enemies
+                        if not isinstance(e, dict):
+                            continue
+                        dist = self._distance(self_pos, e)
+                        if dist < 10:
+                            targetable.append((e, dist))
+                    
+                    if targetable:
+                        # Sort by HP (lowest first)
+                        targetable.sort(key=lambda x: float(x[0].get("hp", 0)))
+                        target, dist = targetable[0]
                         
-                        if targetable:
-                            targetable.sort(key=lambda e: float(e.get("hp", 0)))
-                            target = targetable[0]
-                            
-                            target_hp = float(target.get("hp", 0))
-                            target_def = float(target.get("defense", target.get("def", 0)))
-                            kill_prob = (my_atk - target_def) / max(target_hp, 1)
-                            
-                            if kill_prob > 0.6:
-                                self.stats["kill_priority"] += 1
-                                return PriorityDecision(
-                                    priority=3,
-                                    action_type="attack",
-                                    target_id=target.get("agentId") or target.get("monsterId") or target.get("id"),
-                                    reasoning=f"Kill opportunity (HP: {target_hp:.0f})",
-                                    confidence=min(kill_prob, 0.9)
-                                )
-                except Exception as e:
-                    pass
+                        target_hp = float(target.get("hp", 0))
+                        target_def = float(target.get("defense", target.get("def", 0)))
+                        kill_prob = (my_atk - target_def) / max(target_hp, 1)
+                        
+                        if kill_prob > 0.6:
+                            self.stats["kill_priority"] += 1
+                            return PriorityDecision(
+                                priority=3,
+                                action_type="attack",
+                                target_id=target.get("agentId") or target.get("monsterId") or target.get("id"),
+                                reasoning=f"Kill opportunity (HP: {target_hp:.0f})",
+                                confidence=min(kill_prob, 0.9)
+                            )
             
             # === PRIORITY 4: EXPLORE (DENGAN RUIN FARMING) ===
             
-            # Ruin farming dengan alert management
             if hp_ratio > 0.6 and alert < 6:
-                try:
-                    for obj in state.get_interactables():
-                        if not isinstance(obj, dict):
-                            continue
-                        obj_type = str(obj.get("type", obj.get("kind", ""))).lower()
-                        if "ruin" in obj_type:
-                            distance = self._distance(state.get_self(), obj)
-                            if distance < 3:
-                                self.stats["explore_priority"] += 1
-                                return PriorityDecision(
-                                    priority=4,
-                                    action_type="explore",
-                                    target_id=obj.get("interactableId") or obj.get("id"),
-                                    reasoning=f"Farming ruin (distance: {distance:.1f})",
-                                    confidence=0.8
-                                )
-                            elif distance < 8:
-                                self.stats["explore_priority"] += 1
-                                return PriorityDecision(
-                                    priority=4,
-                                    action_type="move",
-                                    target_id=obj.get("regionId"),
-                                    reasoning="Moving to ruin",
-                                    confidence=0.65
-                                )
-                except Exception as e:
-                    pass
+                interactables = state.get_interactables()
+                for obj in interactables[:8]:
+                    if not isinstance(obj, dict):
+                        continue
+                    obj_type = str(obj.get("type", obj.get("kind", ""))).lower()
+                    if "ruin" in obj_type:
+                        distance = self._distance(state.get_self(), obj)
+                        if distance < 3:
+                            self.stats["explore_priority"] += 1
+                            return PriorityDecision(
+                                priority=4,
+                                action_type="explore",
+                                target_id=obj.get("interactableId") or obj.get("id"),
+                                reasoning=f"Farming ruin (distance: {distance:.1f})",
+                                confidence=0.8
+                            )
+                        elif distance < 8:
+                            self.stats["explore_priority"] += 1
+                            return PriorityDecision(
+                                priority=4,
+                                action_type="move",
+                                target_id=obj.get("regionId"),
+                                reasoning="Moving to ruin",
+                                confidence=0.65
+                            )
             
             # === FALLBACK: MOVE TOWARDS CENTER ===
             
-            try:
-                for conn in state.get_connections():
-                    if isinstance(conn, dict) and conn.get("safetyScore", 0) > 0.5:
-                        return PriorityDecision(
-                            priority=4,
-                            action_type="move",
-                            target_id=conn.get("regionId"),
-                            reasoning="Moving to safer area",
-                            confidence=0.5
-                        )
-                
-                for conn in state.get_connections():
-                    if isinstance(conn, dict) and not conn.get("insideDeathZone", False):
-                        return PriorityDecision(
-                            priority=4,
-                            action_type="move",
-                            target_id=conn.get("regionId"),
-                            reasoning="Moving randomly",
-                            confidence=0.3
-                        )
-            except Exception as e:
-                pass
+            connections = state.get_connections()
+            for conn in connections[:5]:
+                if isinstance(conn, dict) and conn.get("safetyScore", 0) > 0.5:
+                    return PriorityDecision(
+                        priority=4,
+                        action_type="move",
+                        target_id=conn.get("regionId"),
+                        reasoning="Moving to safer area",
+                        confidence=0.5
+                    )
+            
+            for conn in connections[:5]:
+                if isinstance(conn, dict) and not conn.get("insideDeathZone", False):
+                    return PriorityDecision(
+                        priority=4,
+                        action_type="move",
+                        target_id=conn.get("regionId"),
+                        reasoning="Moving randomly",
+                        confidence=0.3
+                    )
             
         except Exception as e:
             logger.debug(f"Priority decision error: {e}")
@@ -594,32 +602,9 @@ class HybridAIEngine:
     
     def get_stats(self) -> Dict:
         """Dapatkan statistik decision"""
-        return self.stats
-    
-    def get_cache_stats(self) -> Dict[str, Any]:
-        """Dapatkan statistik cache"""
         return {
-            "cache_size": len(self._decision_cache),
+            **self.stats,
             "cache_hits": self._cache_hits,
             "cache_misses": self._cache_misses,
-            "hit_rate": self._cache_hits / max(self._cache_hits + self._cache_misses, 1) * 100
-        }
-    
-    def clear_cache(self):
-        """Clear decision cache"""
-        self._decision_cache.clear()
-        self._cache_hits = 0
-        self._cache_misses = 0
-        logger.info("🧹 Decision cache cleared")
-    
-    def get_memory_summary(self) -> Dict[str, Any]:
-        """Dapatkan summary memory usage"""
-        mem_stats = self.knowledge.get_memory_stats()
-        cache_stats = self.get_cache_stats()
-        
-        return {
-            "knowledge": mem_stats,
-            "cache": cache_stats,
-            "turn": self.turn,
-            "total_decisions": self.stats["decisions_made"]
+            "cache_hit_rate": self._cache_hits / max(self._cache_hits + self._cache_misses, 1) * 100
         }
