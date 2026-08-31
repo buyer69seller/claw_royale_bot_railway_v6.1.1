@@ -56,7 +56,7 @@ class LoadoutService:
         else:
             return effects.get("sub")
     
-    # ===== TIER & SUB LOGIC (BARU) =====
+    # ===== TIER & SUB LOGIC =====
     
     def get_sub_attenuation(self, pack_name: str) -> Dict[str, Any]:
         """
@@ -184,7 +184,7 @@ class LoadoutService:
         
         return base_bonus
     
-    def get_best_pack_for_slot(self, slot: str, excluded: List[str] = None) -> Optional[Dict]:
+    async def get_best_pack_for_slot(self, slot: str, excluded: List[str] = None) -> Optional[Dict]:
         """
         Dapatkan pack terbaik untuk slot tertentu (main/sub)
         Mempertimbangkan tier dan attenuasi
@@ -302,6 +302,7 @@ class LoadoutService:
     # ===== RELIC SELECTION =====
     
     async def get_best_relics(self, count: int = 3) -> List[Dict]:
+        """Dapatkan relic terbaik dari inventory"""
         inventory = await self.rest.get_inventory()
         relics = inventory.get("relics", [])
         
@@ -332,6 +333,7 @@ class LoadoutService:
         return [r["relic"] for r in best]
     
     def _score_relic(self, relic: Dict) -> float:
+        """Skor relic berdasarkan affixes"""
         affixes = relic.get("affixes", [])
         tier = relic.get("tier", 0)
         
@@ -356,6 +358,7 @@ class LoadoutService:
         return max(score, -100)
     
     def _get_relic_slot(self, relic: Dict) -> int:
+        """Dapatkan slot relic berdasarkan tipe"""
         name = relic.get("name", "")
         for gem_name, slot in RELIC_SLOTS.items():
             if gem_name in name:
@@ -363,6 +366,7 @@ class LoadoutService:
         return 0
     
     def _get_relic_display_name(self, relic: Dict) -> str:
+        """Dapatkan display name relic"""
         name = relic.get("name", "Unknown")
         affixes = relic.get("affixes", [])
         
@@ -385,6 +389,7 @@ class LoadoutService:
         return " ".join(affix_names + [name])
     
     def get_relic_farming_priority(self, current_relics: List[Dict]) -> Dict[str, Any]:
+        """Dapatkan prioritas farming relic"""
         if not current_relics:
             return {
                 "priority": "high",
@@ -422,6 +427,7 @@ class LoadoutService:
         }
     
     async def get_inventory_status(self) -> Dict[str, Any]:
+        """Dapatkan status inventory"""
         inventory = await self.rest.get_inventory()
         
         relics = inventory.get("relics", [])
@@ -450,6 +456,7 @@ class LoadoutService:
         }
     
     async def optimize_loadout(self) -> Dict[str, Any]:
+        """Optimasi loadout dengan Pre-Season 1 logic"""
         try:
             best = await self.get_best_pack_combo()
             current = await self.get_current_loadout()
