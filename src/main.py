@@ -16,6 +16,7 @@ from .core.config import API_KEY
 from .utils.logger import setup_logging
 from .services.reward_service import RewardService
 from .services.loadout_service import LoadoutService
+from .services.inventory_service import InventoryService  # <-- TAMBAHKAN
 from .utils.health import HealthServer
 from .ai.knowledge import KnowledgeBase
 from .core.constants import ensure_directories
@@ -61,7 +62,7 @@ async def main():
 
     # Setup logging FIRST
     setup_logging()
-    logger = logging.getLogger(__name__)  # <-- INI HARUS PERTAMA
+    logger = logging.getLogger(__name__)
 
     # Ensure directories exist
     ensure_directories()
@@ -128,9 +129,9 @@ async def main():
                 logger.info("✅ Loadout already full")
         except Exception as e:
             logger.debug(f"Loadout optimization skipped: {e}")
+
         # ===== AUTO-EQUIP BEST ITEMS (BARU) =====
         try:
-            from .services.inventory_service import InventoryService
             inventory_service = InventoryService(rest)
             logger.info("🔧 Auto-equipping best items...")
             result = await inventory_service.auto_equip_best()
@@ -140,6 +141,7 @@ async def main():
                 logger.warning(f"⚠️ Auto-equip errors: {result['errors']}")
         except Exception as e:
             logger.debug(f"Auto-equip skipped: {e}")
+
         # ===== DRIVER SETUP =====
         logger.info("=" * 60)
         logger.info("🚀 Starting Hybrid AI Auto-Pilot...")
