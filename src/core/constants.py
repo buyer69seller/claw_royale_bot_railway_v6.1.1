@@ -73,13 +73,13 @@ DOCS_TO_CACHE = [
     "/references/paid-games.md",
 ]
 
-# ===== AI Constants =====
+# AI Constants
 AI_LEARNING_RATE = 0.1
 AI_CONFIDENCE_THRESHOLD = 0.6
 AI_RISK_THRESHOLD = 0.7
 AI_STRATEGY_SWITCH_INTERVAL = 10
 
-# ===== AUTO-EQUIP Constants =====
+# AUTO-EQUIP Constants
 AUTO_EQUIP_ENABLED = True
 AUTO_EQUIP_INTERVAL_GAMES = 3
 AUTO_EQUIP_ON_STARTUP = True
@@ -95,6 +95,38 @@ SUB_CAPABLE_PACKS = [
     "Ranged", "Sword Master", "Duelist", "Raider",
     "Last Stand", "Iron Heart", "Sunflame Cloak", "Pickpocket"
 ]
+
+# ===== SUB ATTENUATION MODES (BARU) =====
+SUB_ATTENUATION_MODES = {
+    "MULTIPLY_0_5": "×0.5",
+    "PARTIAL": "Partial",
+    "SUB_VALUE": "Sub value",
+    "MAIN_ONLY": "Main only"
+}
+
+# ===== PACK ATTENUATION MAPPING (BARU) =====
+PACK_ATTENUATION = {
+    "Moltz Expert": {"mode": "MULTIPLY_0_5", "sub_factor": 0.5},
+    "Item Expert": {"mode": "MULTIPLY_0_5", "sub_factor": 0.5},
+    "Goliath": {"mode": "MULTIPLY_0_5", "sub_factor": 0.5},
+    "Thorns": {"mode": "PARTIAL", "sub_factors": {"dmg_reduction": 0.25, "reflect": 0.5}},
+    "Scout": {"mode": "MAIN_ONLY"},
+    "Ruin Expert": {"mode": "SUB_VALUE", "sub_effect": "same as main"},
+    "Berserker": {"mode": "PARTIAL", "sub_factors": {"berserker_dmg": 1.3}},
+    "Double Attack": {"mode": "PARTIAL", "sub_factors": {"hit_multiplier": 0.55}},
+    "Heart of the Giant": {"mode": "MULTIPLY_0_5", "sub_factor": 0.5},
+    "Bomber": {"mode": "MULTIPLY_0_5", "sub_factor": 0.5},
+    "Trail Ward": {"mode": "SUB_VALUE", "sub_effect": {"wards": 2}},
+    "Ranged": {"mode": "PARTIAL", "sub_factors": {"ranged_dmg": 0.15, "ep_cost": 1}},
+    "Sword Master": {"mode": "MULTIPLY_0_5", "sub_factor": 0.5},
+    "Duelist": {"mode": "MULTIPLY_0_5", "sub_factor": 0.5},
+    "Raider": {"mode": "SUB_VALUE", "sub_effect": {"steal_slot": True, "ep_cost": 1}},
+    "Last Stand": {"mode": "SUB_VALUE", "sub_effect": {"survive_lethal": True, "berserk_turns": 1}},
+    "Iron Heart": {"mode": "MULTIPLY_0_5", "sub_factor": 0.5},
+    "Sunflame Cloak": {"mode": "MULTIPLY_0_5", "sub_factor": 0.5},
+    "Assassin": {"mode": "MAIN_ONLY"},
+    "Pickpocket": {"mode": "SUB_VALUE", "sub_effect": {"steal_amount": 3, "ep_cost": 1}}
+}
 
 PACK_EFFECTS: Dict[str, Dict] = {
     "Moltz Expert": {
@@ -199,17 +231,26 @@ PACK_EFFECTS: Dict[str, Dict] = {
     }
 }
 
-# ===== PRE-SEASON 1 RELIC DATA (TAMBAHKAN INI) =====
+# Relic affix priorities
+RELIC_AFFIX_PRIORITY = {
+    "ATK": 5,
+    "DMG": 5,
+    "HP": 4,
+    "DEF": 4,
+    "Item ATK": 3,
+    "Explore": 2,
+    "Heal": 2
+}
 
-# Relic slot mapping
+# ===== RELICS PRE-SEASON 1 =====
+
 RELIC_SLOTS = {
     "Ruby": 0,
     "Emerald": 1,
     "Sapphire": 2
 }
 
-# Relic affix definitions
-RELIC_AFFIXES: Dict[str, Dict] = {
+RELIC_AFFIXES = {
     "atk": {
         "positive": {"name": "Ferocious", "min": 1, "max": 10},
         "negative": {"name": "Feeble", "min": -10, "max": -1}
@@ -244,20 +285,8 @@ RELIC_AFFIXES: Dict[str, Dict] = {
     }
 }
 
-# Relic affix priority (higher = better)
-RELIC_AFFIX_PRIORITY: Dict[str, int] = {
-    "atk": 5,
-    "item_atk": 4,
-    "max_hp": 4,
-    "def": 3,
-    "hp_regen": 3,
-    "explore": 2,
-    "max_ep": 2,
-    "ep_regen": 1
-}
-
 # Inventory caps
-INVENTORY_CAPS: Dict[str, int] = {
+INVENTORY_CAPS = {
     "in_game_relics": 5,
     "in_game_packs": 1,
     "lobby_relics": 15,
@@ -286,25 +315,111 @@ def is_sub_capable_pack(name: str) -> bool:
     """Cek apakah pack bisa di Sub slot"""
     return name in SUB_CAPABLE_PACKS
 
+def get_sub_attenuation(name: str) -> Dict[str, Any]:
+    """
+    Dapatkan informasi attenuasi Sub slot untuk pack
+    """
+    attenuation = PACK_ATTENUATION.get(name, {})
+    mode = attenuation.get("mode", "MULTIPLY_0_5")
+    
+    if mode == "MAIN_ONLY":
+        return {
+            "mode": "MAIN_ONLY",
+            "can_use_sub": False,
+            "description": "Cannot be placed in Sub slot"
+        }
+    elif mode == "MULTIPLY_0_5":
+        factor = attenuation.get("sub_factor", 0.5)
+        return {
+            "mode": "MULTIPLY_0_5",
+            "can_use_sub": True,
+            "factor": factor,
+            "description": f"Final value halved (×{factor})"
+        }
+    elif mode == "PARTIAL":
+        sub_factors = attenuation.get("sub_factors", {})
+        return {
+            "mode": "PARTIAL",
+            "can_use_sub": True,
+            "factors": sub_factors,
+            "description": "Only certain coefficients reduced"
+        }
+    elif mode == "SUB_VALUE":
+        sub_effect = attenuation.get("sub_effect", {})
+        return {
+            "mode": "SUB_VALUE",
+            "can_use_sub": True,
+            "effect": sub_effect,
+            "description": "Replaced with Sub-only value"
+        }
+    
+    return {"mode": "UNKNOWN", "can_use_sub": True}
+
 def get_pack_tier_effect(pack_name: str, tier: int, slot: str = "main") -> Dict:
-    """Dapatkan efek pack berdasarkan tier"""
+    """
+    Dapatkan efek pack berdasarkan tier dan slot
+    """
     base_effect = get_pack_effect(pack_name, slot)
     if not base_effect:
         return {}
     
+    # Tier multiplier (T1 = 1.0, T2 = 0.8, T3 = 0.6)
     tier_multiplier = {1: 1.0, 2: 0.8, 3: 0.6}.get(tier, 1.0)
     
+    # Dapatkan attenuasi sub
+    sub_info = get_sub_attenuation(pack_name)
+    
+    # Apply tier multiplier to numeric values
     result = {}
     for key, value in base_effect.items():
         if isinstance(value, (int, float)):
-            result[key] = value * tier_multiplier
+            # Apply tier multiplier
+            tiered_value = value * tier_multiplier
+            
+            # Apply sub attenuation if slot is sub
+            if slot == "sub" and sub_info.get("mode") == "MULTIPLY_0_5":
+                tiered_value *= sub_info.get("factor", 0.5)
+            
+            result[key] = tiered_value
         else:
             result[key] = value
     
     return result
 
+def get_pack_tier_priority(pack_name: str, tier: int, slot: str = "main") -> float:
+    """
+    Dapatkan prioritas pack berdasarkan tier dan slot
+    """
+    # Base priority: T1 > T2 > T3
+    tier_priority = {1: 3.0, 2: 2.0, 3: 1.0}.get(tier, 0)
+    
+    # Main slot bonus
+    slot_bonus = 1.5 if slot == "main" else 1.0
+    
+    # Sub attenuation penalty
+    sub_info = get_sub_attenuation(pack_name)
+    if sub_info.get("mode") == "MAIN_ONLY":
+        return 0 if slot == "sub" else tier_priority * 2
+    
+    # Pack specific bonuses
+    pack_bonus = 0
+    if pack_name in ["Thorns", "Heart of the Giant"]:
+        pack_bonus = 1.2  # Survival packs
+    elif pack_name in ["Berserker", "Double Attack"]:
+        pack_bonus = 1.1  # Damage packs
+    
+    return tier_priority * slot_bonus * pack_bonus
+
 def get_pack_recommendation(strategy_type: str = "balanced") -> Dict[str, str]:
-    """Dapatkan rekomendasi pack berdasarkan strategi"""
+    """
+    Dapatkan rekomendasi pack berdasarkan strategi
+    
+    Args:
+        strategy_type: "survival", "damage", "stealth", "balanced", "economy"
+    
+    Returns:
+        Dict dengan main_pack dan sub_pack
+    """
     recommendations = {
         "survival": {
             "main": "Thorns",
@@ -345,69 +460,10 @@ def get_pack_recommendation(strategy_type: str = "balanced") -> Dict[str, str]:
     
     return recommendations.get(strategy_type, recommendations["balanced"])
 
-# ===== RELIC HELPER FUNCTIONS (TAMBAHKAN INI) =====
+def get_tier_name(tier: int) -> str:
+    """Dapatkan nama tier"""
+    return {1: "T1", 2: "T2", 3: "T3"}.get(tier, f"T{tier}")
 
-def get_relic_slot(gem_type: str) -> Optional[int]:
-    """Dapatkan slot untuk relic berdasarkan gem type"""
-    return RELIC_SLOTS.get(gem_type)
-
-def get_affix_display_name(stat: str, value: int) -> str:
-    """Dapatkan display name affix berdasarkan stat dan value"""
-    affix_data = RELIC_AFFIXES.get(stat)
-    if not affix_data:
-        return stat
-    
-    if value >= 0:
-        return affix_data["positive"]["name"]
-    else:
-        return affix_data["negative"]["name"]
-
-def score_relic(relic: Dict) -> float:
-    """
-    Skor relic berdasarkan affixes
-    - ATK: nilai tertinggi
-    - Item ATK: nilai tinggi
-    - Max HP: nilai sedang
-    - DEF: nilai sedang
-    - HP Regen: nilai sedang
-    """
-    affixes = relic.get("affixes", [])
-    tier = relic.get("tier", 0)
-    
-    score = tier * 10
-    
-    for affix in affixes:
-        stat = affix.get("stat", "")
-        value = affix.get("value", 0)
-        
-        priority = RELIC_AFFIX_PRIORITY.get(stat, 1)
-        score += value * priority
-    
-    # Bonus untuk positive affixes
-    if score > 0:
-        score *= 1.2
-    
-    return score
-
-def get_best_relics(relics: List[Dict], count: int = 3) -> List[Dict]:
-    """Dapatkan N relic terbaik berdasarkan skor"""
-    scored = [(r, score_relic(r)) for r in relics]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [r for r, _ in scored[:count]]
-
-def get_relic_summary(relic: Dict) -> str:
-    """Dapatkan ringkasan relic dalam format string"""
-    gem_type = relic.get("type", relic.get("gem_type", "Unknown"))
-    affixes = relic.get("affixes", [])
-    
-    if not affixes:
-        return gem_type
-    
-    names = []
-    for affix in affixes:
-        stat = affix.get("stat", "")
-        value = affix.get("value", 0)
-        name = get_affix_display_name(stat, value)
-        names.append(name)
-    
-    return f"{' '.join(names)} {gem_type}"
+def get_tier_strength(tier: int) -> str:
+    """Dapatkan kekuatan tier"""
+    return {1: "⭐⭐⭐ (Strongest)", 2: "⭐⭐ (Medium)", 3: "⭐ (Weakest)"}.get(tier, "Unknown")
