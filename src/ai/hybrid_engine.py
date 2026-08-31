@@ -1,5 +1,5 @@
 # src/ai/hybrid_engine.py
-"""Hybrid AI Engine - Gabungan AI Auto-Pilot + Competitive v7 dengan Item Tracking"""
+"""Hybrid AI Engine - Gabungan AI Auto-Pilot + Competitive v7 dengan Item Tracking & Memory Stats"""
 
 import logging
 import math
@@ -29,12 +29,14 @@ class ThreatAssessment:
     is_safe: bool
     should_fight: bool
     should_flee: bool
+    guardian_nearby: bool = False
+    guardian_distance: float = 999.0
 
 
 @dataclass
 class PriorityDecision:
     """Keputusan berdasarkan priority"""
-    priority: int
+    priority: int  # 1=survival, 2=loot, 3=kill, 4=explore
     action_type: str
     target_id: Optional[str] = None
     reasoning: str = ""
@@ -47,6 +49,7 @@ class HybridAIEngine:
     1. AI Auto-Pilot (ML/Neural)
     2. Competitive v7 (Heuristic/Priority)
     3. Item Tracking & Validation
+    4. Memory Stats Monitoring
     """
     
     def __init__(self):
@@ -59,6 +62,7 @@ class HybridAIEngine:
         self.kills = 0
         self.survival_time = 0
         
+        # Stats tracking
         self.stats = {
             "decisions_made": 0,
             "ai_decisions": 0,
@@ -68,21 +72,51 @@ class HybridAIEngine:
             "loot_priority": 0,
             "explore_priority": 0
         }
+        
+        # ===== MEMORY STATS TRACKING =====
+        self._last_memory_log_turn = 0
+        self._memory_log_interval = 50  # Log setiap 50 turn
+        
+        # Decision cache untuk optimasi
+        self._decision_cache = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
     
     async def decide(self, state: GameState) -> AIDecision:
-        """Hybrid decision making"""
+        """
+        Hybrid decision making:
+        1. AI Analysis (ML-based)
+        2. Threat Assessment (v7)
+        3. Priority-based selection (v7) dengan Item Tracking
+        4. Final decision (AI + Heuristic)
+        5. Memory Stats Monitoring
+        """
         self.turn += 1
         
+        # ===== CACHE CHECK =====
+        view_hash = hash(str(state.view.get("self", {})) + str(state.turn))
+        if view_hash in self._decision_cache:
+            self._cache_hits += 1
+            return self._decision_cache[view_hash]
+        self._cache_misses += 1
+        
+        # Step 1: AI Perception
         perceived = self.perception.perceive(state)
+        
+        # Step 2: Threat Assessment (v7)
         threat = await self._assess_threat(perceived, state)
+        
+        # Step 3: Priority Decision (v7) dengan Item Tracking
         priority_decision = await self._priority_decision(perceived, state, threat)
         
+        # Step 4: AI Decision (ML)
         ai_decision = await self.ai._make_decision(
             perceived, 
             self.ai.analyzer.analyze(perceived),
             self.risk.assess_current_situation(perceived)
         )
         
+        # Step 5: Hybrid Selection
         final_decision = await self._hybrid_selection(
             priority_decision, 
             ai_decision, 
@@ -90,18 +124,42 @@ class HybridAIEngine:
             threat
         )
         
+        # ===== CACHE STORE =====
+        if len(self._decision_cache) > 100:
+            # Limit cache size
+            self._decision_cache.clear()
+        self._decision_cache[view_hash] = final_decision
+        
+        # Update stats
         self.stats["decisions_made"] += 1
         if final_decision.confidence > 0.6:
             self.stats["ai_decisions"] += 1
         else:
             self.stats["heuristic_decisions"] += 1
         
+        # ===== LOG ITEM STATS PERIODIK =====
         if self.turn % 10 == 0:
             try:
                 item_stats = state.get_item_stats()
                 logger.debug(f"📊 Item Stats: {item_stats}")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Item stats error: {e}")
+        
+        # ===== LOG MEMORY STATS PERIODIK =====
+        if self.turn - self._last_memory_log_turn >= self._memory_log_interval:
+            self._last_memory_log_turn = self.turn
+            try:
+                mem_stats = self.knowledge.get_memory_stats()
+                cache_stats = {
+                    "cache_size": len(self._decision_cache),
+                    "cache_hits": self._cache_hits,
+                    "cache_misses": self._cache_misses,
+                    "hit_rate": self._cache_hits / max(self._cache_hits + self._cache_misses, 1) * 100
+                }
+                logger.info(f"🧠 Memory Stats: {mem_stats}")
+                logger.info(f"💾 Cache Stats: {cache_stats}")
+            except Exception as e:
+                logger.debug(f"Memory stats error: {e}")
         
         logger.info(
             f"🧠 Hybrid AI: {final_decision.action_type} "
@@ -142,6 +200,7 @@ class HybridAIEngine:
             enemies = state.get_enemies()
             valid_enemies = [e for e in enemies if isinstance(e, dict)]
             
+            # Guardian detection
             guardian_nearby = False
             guardian_distance = 999.0
             
@@ -151,6 +210,7 @@ class HybridAIEngine:
                     dist = self._distance(me, enemy)
                     if dist < guardian_distance:
                         guardian_distance = dist
+                        logger.debug(f"🛡️ Guardian detected at distance: {dist:.1f}")
             
             threat["guardian_nearby"] = guardian_nearby
             threat["guardian_distance"] = guardian_distance
@@ -159,6 +219,7 @@ class HybridAIEngine:
                 threat["risk_score"] += 0.3 * (1 - guardian_distance / 15)
                 threat["should_flee"] = True
                 threat["should_fight"] = False
+                logger.info(f"🛡️ Guardian nearby ({guardian_distance:.1f}m) - fleeing!")
             
             if valid_enemies:
                 closest = min(valid_enemies, key=lambda e: self._distance(me, e))
@@ -209,7 +270,9 @@ class HybridAIEngine:
         return threat
     
     async def _priority_decision(self, perceived: PerceivedState, state: GameState, threat: Dict) -> PriorityDecision:
-        """v7 Priority-based decision dengan Item Tracking"""
+        """
+        v7 Priority-based decision dengan Item Tracking
+        """
         
         try:
             me = state.get_self()
@@ -356,6 +419,19 @@ class HybridAIEngine:
             except Exception as e:
                 pass
             
+            # Move to items in range (distance < 5)
+            for item in loot_items:
+                distance = self._distance(state.get_self(), item)
+                if distance < 5 and threat["risk_score"] < 0.4:
+                    self.stats["loot_priority"] += 1
+                    return PriorityDecision(
+                        priority=2,
+                        action_type="move",
+                        target_id=item.get("regionId"),
+                        reasoning="Moving to collect item",
+                        confidence=0.7
+                    )
+            
             # === PRIORITY 3: KILL ===
             
             if hp_ratio > 0.5 and threat.get("should_fight", False):
@@ -392,6 +468,7 @@ class HybridAIEngine:
             
             # === PRIORITY 4: EXPLORE (DENGAN RUIN FARMING) ===
             
+            # Ruin farming dengan alert management
             if hp_ratio > 0.6 and alert < 6:
                 try:
                     for obj in state.get_interactables():
@@ -459,6 +536,7 @@ class HybridAIEngine:
     async def _hybrid_selection(self, priority: PriorityDecision, ai: AIDecision, perceived: PerceivedState, threat: Dict) -> AIDecision:
         """Memilih antara AI dan Priority decision"""
         
+        # Jika priority confidence tinggi, pakai priority
         if priority.confidence > 0.8:
             return AIDecision(
                 action_type=priority.action_type,
@@ -469,9 +547,11 @@ class HybridAIEngine:
                 expected_value=1 - threat.get("risk_score", 0.5)
             )
         
+        # Jika AI confidence tinggi dan priority tidak urgent, pakai AI
         if ai.confidence > 0.7 and priority.priority > 2:
             return ai
         
+        # Critical priority (1-2) override AI
         if priority.priority <= 2:
             return AIDecision(
                 action_type=priority.action_type,
@@ -482,6 +562,7 @@ class HybridAIEngine:
                 expected_value=1 - threat.get("risk_score", 0.5)
             )
         
+        # Default: AI decision
         return ai
     
     def _distance(self, obj1, obj2) -> float:
@@ -512,4 +593,33 @@ class HybridAIEngine:
             return 999.0
     
     def get_stats(self) -> Dict:
+        """Dapatkan statistik decision"""
         return self.stats
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Dapatkan statistik cache"""
+        return {
+            "cache_size": len(self._decision_cache),
+            "cache_hits": self._cache_hits,
+            "cache_misses": self._cache_misses,
+            "hit_rate": self._cache_hits / max(self._cache_hits + self._cache_misses, 1) * 100
+        }
+    
+    def clear_cache(self):
+        """Clear decision cache"""
+        self._decision_cache.clear()
+        self._cache_hits = 0
+        self._cache_misses = 0
+        logger.info("🧹 Decision cache cleared")
+    
+    def get_memory_summary(self) -> Dict[str, Any]:
+        """Dapatkan summary memory usage"""
+        mem_stats = self.knowledge.get_memory_stats()
+        cache_stats = self.get_cache_stats()
+        
+        return {
+            "knowledge": mem_stats,
+            "cache": cache_stats,
+            "turn": self.turn,
+            "total_decisions": self.stats["decisions_made"]
+        }
