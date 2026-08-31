@@ -1,22 +1,23 @@
 # src/strategy/engine.py
-"""Strategy engine dengan Pack Effects Integration (Pre-Season 1)"""
+"""Strategy engine (fallback untuk AI) - dengan perbaikan handling data"""
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Any, Optional
 
 from ..game.state import GameState
 from ..game.actions import ActionBuilder
 from .evaluators import (
     heal_score, combat_score, loot_score, 
     interact_score, explore_score, move_score,
-    alive, get_pack_strategy_modifier, apply_pack_modifiers
+    alive
 )
 from ..core.constants import SCORE_CAVE_EXIT
+from ..core.exceptions import ClawRoyaleError
 
 logger = logging.getLogger(__name__)
 
 class StrategyEngine:
-    """Engine untuk mengambil keputusan dengan Pack Effects"""
+    """Engine untuk mengambil keputusan (fallback) dengan handling data robust"""
     
     def __init__(self):
         self.turn = 0
@@ -25,84 +26,35 @@ class StrategyEngine:
         self._consecutive_rejections = 0
         self._used_interactables = set()
         self._attack_cooldown = 0
-        self._pack_modifiers = {}  # Pack effects modifiers
-        
-        # Pre-Season 1 specific
-        self._has_thorns = False
-        self._has_berserker = False
-        self._has_heart_of_giant = False
-        self._has_last_stand = False
-        self._has_item_expert = False
+        self._pack_modifiers = {}
     
     def set_pack_modifiers(self, main_pack: Dict, sub_pack: Dict):
-        """
-        Set pack modifiers dari loadout
-        Berdasarkan Pre-Season 1 pack data
-        """
+        """Set pack modifiers dari loadout"""
         self._pack_modifiers = {}
         
-        # Reset flags
-        self._has_thorns = False
-        self._has_berserker = False
-        self._has_heart_of_giant = False
-        self._has_last_stand = False
-        self._has_item_expert = False
-        
-        # Process Main Pack
         if main_pack:
             main_name = main_pack.get("name", "")
+            from .evaluators import get_pack_strategy_modifier
             modifiers = get_pack_strategy_modifier(main_name, "main")
             self._pack_modifiers.update(modifiers)
-            
-            # Track specific packs
-            if "Thorns" in main_name:
-                self._has_thorns = True
-            if "Berserker" in main_name:
-                self._has_berserker = True
-            if "Heart of the Giant" in main_name:
-                self._has_heart_of_giant = True
-            if "Last Stand" in main_name:
-                self._has_last_stand = True
-            if "Item Expert" in main_name:
-                self._has_item_expert = True
-            
-            logger.info(f"📦 Main Pack: {main_name}")
         
-        # Process Sub Pack (attenuated)
         if sub_pack:
             sub_name = sub_pack.get("name", "")
+            from .evaluators import get_pack_strategy_modifier
             modifiers = get_pack_strategy_modifier(sub_name, "sub")
-            
-            # Sub pack effects attenuated (×0.5)
             for key, value in modifiers.items():
                 if isinstance(value, (int, float)):
                     self._pack_modifiers[key] = value * 0.5
-                elif isinstance(value, bool):
-                    self._pack_modifiers[key] = value
                 else:
                     self._pack_modifiers[key] = value
-            
-            # Track specific packs (attenuated)
-            if "Thorns" in sub_name:
-                self._has_thorns = True
-            if "Berserker" in sub_name:
-                self._has_berserker = True
-            if "Heart of the Giant" in sub_name:
-                self._has_heart_of_giant = True
-            if "Last Stand" in sub_name:
-                self._has_last_stand = True
-            if "Item Expert" in sub_name:
-                self._has_item_expert = True
-            
-            logger.info(f"📦 Sub Pack: {sub_name}")
         
-        logger.info(f"📊 Pack modifiers: {self._pack_modifiers}")
-        logger.info(f"📊 Pack flags: Thorns={self._has_thorns}, Berserker={self._has_berserker}, Heart={self._has_heart_of_giant}, LastStand={self._has_last_stand}")
+        if self._pack_modifiers:
+            logger.debug(f"📦 Pack modifiers: {self._pack_modifiers}")
     
     def decide(self, state: GameState) -> Dict:
         """
-        Ambil keputusan dengan mempertimbangkan pack effects
-        Berdasarkan Pre-Season 1
+        Ambil keputusan berdasarkan state game
+        Dengan handling data yang robust
         """
         self.turn += 1
         
@@ -110,6 +62,7 @@ class StrategyEngine:
         if self._attack_cooldown > 0:
             self._attack_cooldown -= 1
         
+        # Cek apakah agent mati
         if not state.is_alive:
             return {"kind": "dead", "score": -1e9}
         
@@ -122,170 +75,136 @@ class StrategyEngine:
         
         candidates = []
         hp_ratio = state.hp_ratio()
-        me = state.get_self()
-        my_atk = float(me.get("attack", me.get("atk", 0)))
-        
-        # ===== ADAPTIVE: Pack Effects Based Strategy =====
         
         # === 1. HEALING (PRIORITAS TERTINGGI) ===
-        # Heart of the Giant: bonus healing
-        heal_bonus = self._pack_modifiers.get("heal_priority", 1.0)
-        
         if hp_ratio < 0.4:
+            try:
+                for item in state.get_items():
+                    # Validasi item
+                    if not isinstance(item, dict):
+                        continue
+                    
+                    item_id = item.get("instanceId") or item.get("id")
+                    if not state.is_item_valid(item_id):
+                        continue
+                    
+                    heal = float(item.get("heal", item.get("healAmount", 0)))
+                    if heal > 0:
+                        score = heal_score(item, hp_ratio)
+                        # Bonus jika item dalam jangkauan
+                        me = state.get_self()
+                        distance = state._calculate_distance(me, item)
+                        if distance < 3:
+                            score += 100
+                        candidates.append({"kind": "pickup", "obj": item, "score": score})
+            except Exception as e:
+                logger.debug(f"Healing items error: {e}")
+        
+        # === 2. RETREAT (Jika HP sangat rendah) ===
+        if hp_ratio < 0.2:
+            try:
+                for conn in state.get_connections():
+                    # ===== FIX: Handle jika conn adalah string =====
+                    if isinstance(conn, str):
+                        conn = {"regionId": conn, "insideDeathZone": False, "safetyScore": 0.5}
+                    elif not isinstance(conn, dict):
+                        continue
+                    
+                    if not conn.get("insideDeathZone", False):
+                        candidates.append({"kind": "move", "obj": conn, "score": 500})
+            except Exception as e:
+                logger.debug(f"Retreat error: {e}")
+        
+        # === 3. COMBAT (HANYA JIKA HP > 40%) ===
+        if hp_ratio > 0.4 and self._attack_cooldown == 0:
+            try:
+                for enemy in state.get_enemies():
+                    if not isinstance(enemy, dict):
+                        continue
+                    
+                    enemy_hp = float(enemy.get("hp", 0))
+                    enemy_max_hp = float(enemy.get("maxHp", 1))
+                    enemy_ratio = enemy_hp / max(enemy_max_hp, 1)
+                    
+                    is_guardian = enemy.get("isGuardian", False) or str(enemy.get("kind", "")).lower() == "guardian"
+                    if is_guardian and hp_ratio < 0.6:
+                        continue
+                    
+                    if enemy_ratio < 0.5 or (hp_ratio > 0.7 and enemy_ratio < 0.7):
+                        score = combat_score(enemy, hp_ratio)
+                        if score > 0:
+                            candidates.append({"kind": "attack", "obj": enemy, "score": score})
+            except Exception as e:
+                logger.debug(f"Combat error: {e}")
+        
+        # === 4. LOOT ===
+        try:
             for item in state.get_items():
+                if not isinstance(item, dict):
+                    continue
+                
                 item_id = item.get("instanceId") or item.get("id")
                 if not state.is_item_valid(item_id):
                     continue
                 
-                heal = float(item.get("heal", item.get("healAmount", 0)))
-                if heal > 0:
-                    score = heal_score(item, hp_ratio)
-                    
-                    # Heart of the Giant: bonus untuk healing
-                    if self._has_heart_of_giant:
-                        score *= 1.5  # +50% healing priority
-                    
+                score = loot_score(item)
+                if score > 0:
                     # Bonus jika item dalam jangkauan
+                    me = state.get_self()
                     distance = state._calculate_distance(me, item)
-                    if distance < 2:
-                        score += 200
-                    elif distance < 4:
-                        score += 100
-                    
+                    if distance < 3:
+                        score += 50
                     candidates.append({"kind": "pickup", "obj": item, "score": score})
-        
-        # === 2. RETREAT (Jika HP sangat rendah) ===
-        # Berserker: lebih agresif saat HP rendah, jangan retreat
-        if hp_ratio < 0.15 and not self._has_berserker:
-            for conn in state.get_connections():
-                if not conn.get("insideDeathZone", False):
-                    candidates.append({"kind": "move", "obj": conn, "score": 600})
-        
-        # === 3. COMBAT ===
-        # Thorns: defensive, hanya attack jika aman
-        # Berserker: lebih agresif saat HP rendah
-        # Last Stand: clutch saat HP rendah
-        
-        should_attack = False
-        attack_threshold = 0.4  # Default
-        
-        if self._has_berserker:
-            # Berserker: attack lebih agresif, bahkan saat HP rendah
-            attack_threshold = 0.3
-            if hp_ratio < 0.5 and hp_ratio > 0.2:
-                should_attack = True
-        
-        if self._has_thorns:
-            # Thorns: hanya attack jika HP > 50%
-            if hp_ratio > 0.5:
-                should_attack = True
-        else:
-            if hp_ratio > attack_threshold and self._attack_cooldown == 0:
-                should_attack = True
-        
-        # Last Stand: clutch saat HP kritis
-        if self._has_last_stand and hp_ratio < 0.2:
-            should_attack = True
-        
-        if should_attack:
-            enemies = state.get_enemies()
-            
-            # Sort enemies by priority
-            # Prioritaskan yang HP rendah dan dekat
-            priority_enemies = sorted(
-                [e for e in enemies if alive(e)],
-                key=lambda e: (
-                    float(e.get("hp", 0)),  # HP rendah dulu
-                    state._calculate_distance(me, e)  # Jarak dekat dulu
-                )
-            )
-            
-            for enemy in priority_enemies:
-                enemy_hp = float(enemy.get("hp", 0))
-                enemy_max_hp = float(enemy.get("maxHp", 1))
-                enemy_ratio = enemy_hp / max(enemy_max_hp, 1)
-                
-                is_guardian = enemy.get("isGuardian", False) or str(enemy.get("kind", "")).lower() == "guardian"
-                
-                # Guardian avoidance (kecuali Last Stand)
-                if is_guardian and not self._has_last_stand:
-                    continue
-                
-                # Thorns: jangan serang guardian
-                if is_guardian and self._has_thorns:
-                    continue
-                
-                # Berserker: bonus damage saat HP rendah
-                dmg_bonus = 1.0
-                if self._has_berserker and hp_ratio < 0.5:
-                    dmg_bonus = self._pack_modifiers.get("berserker_dmg", 1.7)
-                
-                # Hitung kill probability dengan bonus
-                kill_prob = (my_atk * dmg_bonus) / max(enemy_hp, 1)
-                
-                if kill_prob > 0.4:  # 40% chance to kill
-                    score = combat_score(enemy, hp_ratio)
-                    
-                    # Berserker: bonus attack saat HP rendah
-                    if self._has_berserker and hp_ratio < 0.5:
-                        score *= 1.5
-                    
-                    # Thorns: bonus karena reflect damage
-                    if self._has_thorns:
-                        score *= 1.2
-                    
-                    candidates.append({"kind": "attack", "obj": enemy, "score": score})
-        
-        # === 4. LOOT ===
-        # Item Expert: prioritaskan Moltz
-        for item in state.get_items():
-            item_id = item.get("instanceId") or item.get("id")
-            if not state.is_item_valid(item_id):
-                continue
-            
-            score = loot_score(item)
-            item_type = str(item.get("type", item.get("itemType", ""))).lower()
-            
-            # Item Expert: Moltz lebih berharga
-            if self._has_item_expert and "moltz" in item_type:
-                score *= 2.0
-            
-            if score > 0:
-                # Bonus jika item dalam jangkauan
-                distance = state._calculate_distance(me, item)
-                if distance < 2:
-                    score += 100
-                elif distance < 4:
-                    score += 50
-                
-                candidates.append({"kind": "pickup", "obj": item, "score": score})
+        except Exception as e:
+            logger.debug(f"Loot error: {e}")
         
         # === 5. INTERACT ===
-        for obj in state.get_interactables():
-            obj_id = obj.get("id") or obj.get("interactableId")
-            if obj_id in self._used_interactables:
-                continue
-            
-            score = interact_score(obj)
-            if score > 0:
-                candidates.append({"kind": "interact", "obj": obj, "score": score})
-        
-        # === 6. EXPLORE ===
-        if hp_ratio > 0.5:  # Hanya explore jika HP cukup
+        try:
             for obj in state.get_interactables():
+                if not isinstance(obj, dict):
+                    continue
+                
                 obj_id = obj.get("id") or obj.get("interactableId")
                 if obj_id in self._used_interactables:
                     continue
                 
-                score = explore_score(obj, state.get_region())
+                score = interact_score(obj)
                 if score > 0:
-                    candidates.append({"kind": "explore", "obj": obj, "score": score})
+                    candidates.append({"kind": "interact", "obj": obj, "score": score})
+        except Exception as e:
+            logger.debug(f"Interact error: {e}")
+        
+        # === 6. EXPLORE ===
+        if hp_ratio > 0.6:
+            try:
+                for obj in state.get_interactables():
+                    if not isinstance(obj, dict):
+                        continue
+                    
+                    obj_id = obj.get("id") or obj.get("interactableId")
+                    if obj_id in self._used_interactables:
+                        continue
+                    
+                    score = explore_score(obj, state.get_region())
+                    if score > 0:
+                        candidates.append({"kind": "explore", "obj": obj, "score": score})
+            except Exception as e:
+                logger.debug(f"Explore error: {e}")
         
         # === 7. MOVE (FALLBACK) ===
-        for conn in state.get_connections():
-            score = move_score(conn, state.in_cave)
-            if score > 0:
-                candidates.append({"kind": "move", "obj": conn, "score": score})
+        try:
+            for conn in state.get_connections():
+                # ===== FIX: Handle jika conn adalah string =====
+                if isinstance(conn, str):
+                    conn = {"regionId": conn, "insideDeathZone": False, "safetyScore": 0.5}
+                elif not isinstance(conn, dict):
+                    continue
+                
+                score = move_score(conn, state.in_cave)
+                if score > 0:
+                    candidates.append({"kind": "move", "obj": conn, "score": score})
+        except Exception as e:
+            logger.debug(f"Move error: {e}")
         
         # === 8. WAIT (LAST RESORT) ===
         if not candidates:
@@ -293,9 +212,6 @@ class StrategyEngine:
         
         # Pilih yang terbaik
         best = max(candidates, key=lambda x: x["score"])
-        
-        # === APPLY PACK MODIFIERS ===
-        best = apply_pack_modifiers(best, self._pack_modifiers)
         
         # Set attack cooldown
         if best["kind"] == "attack":
@@ -313,14 +229,41 @@ class StrategyEngine:
             if item_id:
                 state.mark_item_attempted(item_id)
         
-        # Log decision dengan pack info
+        # ===== Apply pack modifiers =====
         if self._pack_modifiers:
-            logger.debug(f"📦 Pack modifier applied to {best['kind']}")
+            best = self._apply_pack_modifiers(best)
         
         return best
     
+    def _apply_pack_modifiers(self, decision: Dict) -> Dict:
+        """Terapkan pack modifiers pada keputusan"""
+        modifiers = self._pack_modifiers
+        if not modifiers:
+            return decision
+        
+        modified = dict(decision)
+        
+        # Defensive: prioritaskan survival
+        if modifiers.get("defensive"):
+            if modified.get("kind") in ["attack", "explore"]:
+                modified["score"] *= 0.7
+        
+        # Heal priority
+        if modifiers.get("heal_priority", 1.0) > 1.0:
+            if modified.get("kind") == "pickup":
+                heal = modified.get("obj", {}).get("heal", 0)
+                if heal > 0:
+                    modified["score"] *= modifiers["heal_priority"]
+        
+        # Keep distance
+        if modifiers.get("keep_distance"):
+            if modified.get("kind") == "attack":
+                modified["score"] *= 0.8
+        
+        return modified
+    
     def execute(self, state: GameState, decision: Dict):
-        """Eksekusi keputusan"""
+        """Eksekusi keputusan menjadi action"""
         kind = decision.get("kind")
         obj = decision.get("obj", {})
         
@@ -336,6 +279,9 @@ class StrategyEngine:
         elif kind == "explore":
             return self.action_builder.explore(obj)
         elif kind == "move":
+            # ===== FIX: Handle jika obj adalah string =====
+            if isinstance(obj, str):
+                return self.action_builder.move({"regionId": obj})
             return self.action_builder.move(obj)
         
         return None
@@ -351,23 +297,4 @@ class StrategyEngine:
         self._consecutive_rejections = 0
         self._last_action = None
         self._pack_modifiers = {}
-        
-        # Reset flags
-        self._has_thorns = False
-        self._has_berserker = False
-        self._has_heart_of_giant = False
-        self._has_last_stand = False
-        self._has_item_expert = False
-    
-    def get_pack_info(self) -> Dict:
-        """Dapatkan informasi pack saat ini"""
-        return {
-            "modifiers": self._pack_modifiers,
-            "flags": {
-                "thorns": self._has_thorns,
-                "berserker": self._has_berserker,
-                "heart_of_giant": self._has_heart_of_giant,
-                "last_stand": self._has_last_stand,
-                "item_expert": self._has_item_expert
-            }
-        }
+        self.turn = 0
